@@ -1,0 +1,4 @@
+# 开发/验收依赖：跑 _verify/ 下的验收脚本时才需要
+-r requirements.txt
+pytest>=8
+websocket-client>=1.7      # _verify/v08_browser.py 用 CDP 驱动真实 Edge

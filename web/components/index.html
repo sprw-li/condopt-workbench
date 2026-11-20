@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>组件库 · 课隙 EduKit</title>
+  <meta name="description" content="AI 教育场景常用前端组件：场景卡、评分条、证据块、闪卡、步骤条、复核签章，复制即用。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231b2430'/%3E%3Cpath d='M9 21V11h10v10' fill='none' stroke='%2363c9b8' stroke-width='2'/%3E%3Ccircle cx='22' cy='20' r='3' fill='%23c2410c'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="../assets/base.css">
+  <link rel="stylesheet" href="../assets/components.css">
+  <link rel="stylesheet" href="../assets/app.css">
+  <link rel="stylesheet" href="../assets/gallery.css">
+  <script defer src="../vendor/lucide.min.js"></script>
+  <script defer src="../assets/gallery.js"></script>
+</head>
+<body class="gallery-page">
+
+<header class="topbar">
+  <a class="brand" href="../index.html">
+    <span class="seal" aria-hidden="true">育</span>
+    <span class="brand-copy">
+      <strong>课隙 · 组件库</strong>
+      <small>复制片段，拼出你的教育 AI 界面</small>
+    </span>
+  </a>
+  <nav class="nav" aria-label="主导航">
+    <a href="../index.html">工作台</a>
+    <a href="./index.html" class="is-active">组件库</a>
+    <a href="../README.md" target="_blank" rel="noopener">接入说明</a>
+  </nav>
+  <div class="top-actions">
+    <span class="badge badge-teal"><span class="dot"></span>12 个片段</span>
+    <button class="btn btn-ghost btn-icon" id="themeBtn" aria-label="切换深浅色" data-tip="深浅色">
+      <i data-lucide="moon"></i>
+    </button>
+    <a class="btn btn-ghost btn-icon" href="../index.html" aria-label="返回工作台" data-tip="返回工作台">
+      <i data-lucide="arrow-left"></i>
+    </a>
+  </div>
+</header>
+
+<main class="gallery-main">
+  <section class="gallery-hero">
+    <span class="kicker">EDUKIT · COMPONENTS</span>
+    <h1>把课堂里<br>真正会出现的界面，<span class="nowrap">先做好。</span></h1>
+    <p>不是通用按钮大全。这里只放 AI 教育演示里高频、且容易被做丑的 12 个片段：评分、证据、风险、闪卡、复核。全部无构建、离线可用，点开代码即可复制。</p>
+    <div class="gallery-meta">
+      <span><b>01</b> 无 npm / 无打包</span>
+      <span><b>02</b> 纯 HTML + CSS</span>
+      <span><b>03</b> 已适配深浅色</span>
+      <span><b>04</b> 可离线复用</span>
+    </div>
+  </section>
+
+  <section class="gallery-section">
+    <div class="section-head">
+      <div>
+        <span class="kicker">01 / NAVIGATION</span>
+        <h2>选择与进入</h2>
+      </div>
+      <p>先让评委一眼知道“这里有几种能力”。</p>
+    </div>
+
+    <div class="demo-grid">
+
+      <!-- 01 场景卡 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">01</span>
+          <div>
+            <h2>场景选择卡</h2>
+            <p>左栏导航 / 首页功能入口。编号、图标、一句价值，三件事够了。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <div class="stack" style="width:min(320px,100%)">
+            <button class="scenario-card is-active" type="button">
+              <span class="scenario-no">01</span>
+              <span class="scenario-icon"><i data-lucide="pen-line"></i></span>
+              <span class="scenario-copy"><strong>作业批改</strong><small>规则 → 证据</small></span>
+              <span class="scenario-arrow">→</span>
+            </button>
+            <button class="scenario-card" type="button">
+              <span class="scenario-no">02</span>
+              <span class="scenario-icon"><i data-lucide="activity"></i></span>
+              <span class="scenario-copy"><strong>学情预警</strong><small>信号 → 风险</small></span>
+              <span class="scenario-arrow">→</span>
+            </button>
+            <button class="scenario-card" type="button">
+              <span class="scenario-no">03</span>
+              <span class="scenario-icon"><i data-lucide="layers"></i></span>
+              <span class="scenario-copy"><strong>学习卡片</strong><small>讲义 → 卡片</small></span>
+              <span class="scenario-arrow">→</span>
+            </button>
+          </div>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <button class="scenario-card is-active" type="button">
+            <span class="scenario-no">01</span>
+            <span class="scenario-icon"><i data-lucide="pen-line"></i></span>
+            <span class="scenario-copy">
+              <strong>作业批改</strong>
+              <small>规则 → 证据</small>
+            </span>
+            <span class="scenario-arrow">→</span>
+          </button>
+        </template>
+      </article>
+
+      <aside class="note-card">
+        <span class="kicker">选择原则</span>
+        <h3>少一点组件，<br>多一点判断。</h3>
+        <ul>
+          <li>评委只记得住一个画面：证据 + 分数 + 人工确认。</li>
+          <li>所有 AI 结论旁边，都留一个可以点开看的“原文”。</li>
+          <li>风险用文字说清楚，颜色只做辅助，不做诊断。</li>
+          <li>演示时先跑通一条窄闭环，再回头加装饰。</li>
+        </ul>
+        <p>这 12 个片段覆盖了作业批改、学情预警、学习卡片与 AI 导师四类演示。</p>
+      </aside>
+
+    </div>
+  </section>
+
+  <section class="gallery-section">
+    <div class="section-head">
+      <div>
+        <span class="kicker">02 / ASSESSMENT</span>
+        <h2>评价与证据</h2>
+      </div>
+      <p>AI 教育最容易被追问“凭什么”。这些组件就是答案。</p>
+    </div>
+
+    <div class="demo-grid">
+
+      <!-- 02 评分条 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">02</span>
+          <div>
+            <h2>分项评分条</h2>
+            <p>把“62 分”拆成可检查的三项。低于 60% 自动转为警示色。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <div class="rubric" style="width:min(420px,100%)">
+            <div class="rubric-row">
+              <span class="rubric-name">概念与方法</span>
+              <span class="rubric-num">26 / 30</span>
+              <span class="rubric-track"><i style="--v:87%"></i></span>
+            </div>
+            <div class="rubric-row is-low">
+              <span class="rubric-name">过程与计算</span>
+              <span class="rubric-num">22 / 45</span>
+              <span class="rubric-track"><i style="--v:49%"></i></span>
+            </div>
+            <div class="rubric-row">
+              <span class="rubric-name">检验与表达</span>
+              <span class="rubric-num">14 / 25</span>
+              <span class="rubric-track"><i style="--v:56%"></i></span>
+            </div>
+          </div>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <div class="rubric">
+            <div class="rubric-row">
+              <span class="rubric-name">概念与方法</span>
+              <span class="rubric-num">26 / 30</span>
+              <span class="rubric-track"><i style="--v:87%"></i></span>
+            </div>
+            <div class="rubric-row is-low">
+              <span class="rubric-name">过程与计算</span>
+              <span class="rubric-num">22 / 45</span>
+              <span class="rubric-track"><i style="--v:49%"></i></span>
+            </div>
+            <div class="rubric-row">
+              <span class="rubric-name">检验与表达</span>
+              <span class="rubric-num">14 / 25</span>
+              <span class="rubric-track"><i style="--v:56%"></i></span>
+            </div>
+          </div>
+        </template>
+      </article>
+
+      <!-- 03 证据引用 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">03</span>
+          <div>
+            <h2>原文证据块</h2>
+            <p>结论旁边永远跟着出处。评委信的不是分数，是这一块。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <figure class="evidence" style="width:min(440px,100%)">
+            <blockquote>“Δ = (-4)² - 4 × 1 × (-5) = 16 - 20 = -4”</blockquote>
+            <figcaption><span class="src">原文</span> 学生答案 · 第 2 步</figcaption>
+          </figure>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <figure class="evidence">
+            <blockquote>“Δ = (-4)² - 4 × 1 × (-5) = 16 - 20 = -4”</blockquote>
+            <figcaption><span class="src">原文</span> 学生答案 · 第 2 步</figcaption>
+          </figure>
+        </template>
+      </article>
+
+      <!-- 04 风险徽章 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">04</span>
+          <div>
+            <h2>风险等级徽章</h2>
+            <p>只做分流，不做诊断。颜色之外，永远带文字。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <div class="demo-row">
+            <span class="risk risk-low">低风险 · 自助资源</span>
+            <span class="risk risk-mid">中风险 · 班主任跟进</span>
+            <span class="risk risk-high">高风险 · 人工接手</span>
+          </div>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <span class="risk risk-low">低风险 · 自助资源</span>
+          <span class="risk risk-mid">中风险 · 班主任跟进</span>
+          <span class="risk risk-high">高风险 · 人工接手</span>
+        </template>
+      </article>
+
+      <!-- 05 教师复核 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">05</span>
+          <div>
+            <h2>教师复核签章</h2>
+            <p>把“人在回路”做成一个可见的交付物，而不是一句口号。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <div class="signoff" style="width:min(440px,100%)">
+            <div class="signoff-copy">
+              <span class="kicker">教师复核</span>
+              <strong>已确认 · 62 → 65 分</strong>
+              <small>2026-10-24 14:32 · 记录写入本机</small>
+            </div>
+            <span class="stamp">已复核<span>REVIEWED</span></span>
+          </div>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <div class="signoff">
+            <div class="signoff-copy">
+              <span class="kicker">教师复核</span>
+              <strong>已确认 · 62 → 65 分</strong>
+              <small>2026-10-24 14:32 · 记录写入本机</small>
+            </div>
+            <span class="stamp">已复核<span>REVIEWED</span></span>
+          </div>
+        </template>
+      </article>
+
+    </div>
+  </section>
+
+  <section class="gallery-section">
+    <div class="section-head">
+      <div>
+        <span class="kicker">03 / LEARNING</span>
+        <h2>学习内容</h2>
+      </div>
+      <p>卡片、对照、小测。让学生真的动一下，而不是只看 AI 说话。</p>
+    </div>
+
+    <div class="demo-grid">
+
+      <!-- 06 闪卡 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">06</span>
+          <div>
+            <h2>学习闪卡</h2>
+            <p>点击翻面。CSS 3D，无需库；适合知识点自测与现场互动。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <button class="flashcard" type="button" data-flip style="width:min(300px,100%)">
+            <span class="fc-face fc-front">
+              <span class="fc-tag">基础 · 01</span>
+              <span class="fc-q">F = ma 里的 F，指的是什么？</span>
+              <span class="fc-hint">点击翻面</span>
+            </span>
+            <span class="fc-face fc-back">
+              <span class="fc-tag">答案</span>
+              <span class="fc-a">合外力，不是某一个力。先把研究对象受的所有力合成，再代入。</span>
+              <span class="fc-hint">再点一次翻回</span>
+            </span>
+          </button>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <button class="flashcard" type="button" data-flip>
+            <span class="fc-face fc-front">
+              <span class="fc-tag">基础 · 01</span>
+              <span class="fc-q">F = ma 里的 F，指的是什么？</span>
+              <span class="fc-hint">点击翻面</span>
+            </span>
+            <span class="fc-face fc-back">
+              <span class="fc-tag">答案</span>
+              <span class="fc-a">合外力，不是某一个力。先把研究对象受的所有力合成，再代入。</span>
+              <span class="fc-hint">再点一次翻回</span>
+            </span>
+          </button>
+        </template>
+      </article>
+
+      <!-- 07 对照 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">07</span>
+          <div>
+            <h2>原文 / 适配对照</h2>
+            <p>左边照抄原文，右边给低认知负荷版本。一眼看出改了什么。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <div class="compare" style="width:100%">
+            <div class="compare-col">
+              <h4>原始讲义</h4>
+              <p>物体加速度的大小跟它受到的作用力成正比，跟它的质量成反比，加速度的方向跟作用力的方向相同。</p>
+            </div>
+            <div class="compare-col is-adapted">
+              <h4>阅读障碍友好版</h4>
+              <p>力越大，物体加速越快。<br>质量越大，越难加速。<br>方向跟着合力走。</p>
+            </div>
+          </div>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <div class="compare">
+            <div class="compare-col">
+              <h4>原始讲义</h4>
+              <p>物体加速度的大小跟它受到的作用力成正比，跟它的质量成反比。</p>
+            </div>
+            <div class="compare-col is-adapted">
+              <h4>阅读障碍友好版</h4>
+              <p>力越大，物体加速越快。<br>质量越大，越难加速。</p>
+            </div>
+          </div>
+        </template>
+      </article>
+
+      <!-- 08 小测 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">08</span>
+          <div>
+            <h2>小测选项</h2>
+            <p>原生 radio + :has() 选中态，键盘可用；正确 / 错误态直接加类。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <div class="quiz" style="width:min(400px,100%)">
+            <label class="quiz-option"><input type="radio" name="demo-quiz"><span class="q-key">A</span><span>某一个力</span></label>
+            <label class="quiz-option is-correct"><input type="radio" name="demo-quiz" checked><span class="q-key">B</span><span>合外力</span></label>
+            <label class="quiz-option is-wrong"><input type="radio" name="demo-quiz"><span class="q-key">C</span><span>重力</span></label>
+          </div>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <div class="quiz">
+            <label class="quiz-option"><input type="radio" name="q"><span class="q-key">A</span><span>某一个力</span></label>
+            <label class="quiz-option is-correct"><input type="radio" name="q" checked><span class="q-key">B</span><span>合外力</span></label>
+            <label class="quiz-option is-wrong"><input type="radio" name="q"><span class="q-key">C</span><span>重力</span></label>
+          </div>
+        </template>
+      </article>
+
+    </div>
+  </section>
+
+  <section class="gallery-section">
+    <div class="section-head">
+      <div>
+        <span class="kicker">04 / STATUS</span>
+        <h2>流程与状态</h2>
+      </div>
+      <p>让“正在发生什么”可见，演示就不会冷场。</p>
+    </div>
+
+    <div class="demo-grid">
+
+      <!-- 09 步骤 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">09</span>
+          <div>
+            <h2>处理步骤条</h2>
+            <p>完成 / 进行中 / 等待三态。用于流式生成前的“思考过程”。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <ol class="steps" style="width:min(320px,100%)">
+            <li class="step is-done"><span class="step-dot">✓</span><div><strong>解析材料</strong><small>识别题型与附件</small></div></li>
+            <li class="step is-done"><span class="step-dot">✓</span><div><strong>对照评分规则</strong><small>命中 3 条评分项</small></div></li>
+            <li class="step is-running"><span class="step-dot">03</span><div><strong>生成逐项证据</strong><small>正在引用学生原文…</small></div></li>
+            <li class="step"><span class="step-dot">04</span><div><strong>整理教师复核点</strong><small>等待</small></div></li>
+          </ol>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <ol class="steps">
+            <li class="step is-done"><span class="step-dot">✓</span><div><strong>解析材料</strong><small>识别题型与附件</small></div></li>
+            <li class="step is-done"><span class="step-dot">✓</span><div><strong>对照评分规则</strong><small>命中 3 条评分项</small></div></li>
+            <li class="step is-running"><span class="step-dot">03</span><div><strong>生成逐项证据</strong><small>正在引用学生原文…</small></div></li>
+            <li class="step"><span class="step-dot">04</span><div><strong>整理教师复核点</strong><small>等待</small></div></li>
+          </ol>
+        </template>
+      </article>
+
+      <!-- 10 指标 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">10</span>
+          <div>
+            <h2>指标卡</h2>
+            <p>建议分、复核用时、证据条数。数字要少，单位要清楚。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <div class="metrics" style="width:100%">
+            <div class="metric">
+              <span class="metric-label">建议分</span>
+              <span class="metric-value"><strong>62</strong><span>/ 100</span></span>
+              <span class="metric-delta is-down">−6 vs 上次</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">复核用时</span>
+              <span class="metric-value"><strong>2.4</strong><span>min</span></span>
+              <span class="metric-delta">−7.6 min</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">证据条</span>
+              <span class="metric-value"><strong>6</strong><span>条</span></span>
+              <span class="metric-delta">全部可溯源</span>
+            </div>
+          </div>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <div class="metrics">
+            <div class="metric">
+              <span class="metric-label">建议分</span>
+              <span class="metric-value"><strong>62</strong><span>/ 100</span></span>
+              <span class="metric-delta is-down">−6 vs 上次</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">复核用时</span>
+              <span class="metric-value"><strong>2.4</strong><span>min</span></span>
+              <span class="metric-delta">−7.6 min</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">证据条</span>
+              <span class="metric-value"><strong>6</strong><span>条</span></span>
+              <span class="metric-delta">全部可溯源</span>
+            </div>
+          </div>
+        </template>
+      </article>
+
+      <!-- 11 空状态 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">11</span>
+          <div>
+            <h2>空状态</h2>
+            <p>空状态不要只写“暂无数据”。告诉用户下一步点哪里。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <div class="empty-state" style="width:100%">
+            <span class="icon"><i data-lucide="inbox"></i></span>
+            <h3>还没有运行记录</h3>
+            <p>载入一份虚构样例，或者把你的评分规则和学生答案贴进来。</p>
+            <button class="btn btn-sm btn-primary" type="button">载入示例</button>
+          </div>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <div class="empty-state">
+            <span class="icon"><i data-lucide="inbox"></i></span>
+            <h3>还没有运行记录</h3>
+            <p>载入一份虚构样例，或者把你的评分规则和学生答案贴进来。</p>
+            <button class="btn btn-sm btn-primary" type="button">载入示例</button>
+          </div>
+        </template>
+      </article>
+
+      <!-- 12 提示条 -->
+      <article class="demo-card">
+        <header class="demo-head">
+          <span class="demo-no">12</span>
+          <div>
+            <h2>边界提示条</h2>
+            <p>AI 教育产品必须敢写边界。三条以内，放在结果旁边。</p>
+          </div>
+        </header>
+        <div class="demo-preview">
+          <div class="stack" style="width:100%">
+            <div class="callout callout-teal"><strong>AI 只给建议</strong>最终分由教师确认，修改会写入本机记录。</div>
+            <div class="callout callout-warn"><strong>真实模型失败时</strong>自动回退到离线 mock，演示不中断。</div>
+            <div class="callout callout-danger"><strong>高风险求助</strong>只给转介建议，不自动回复、不诊断。</div>
+          </div>
+        </div>
+        <details class="demo-code">
+          <summary>查看 HTML <button class="copy-btn" type="button">复制</button></summary>
+          <pre><code></code></pre>
+        </details>
+        <template>
+          <div class="stack">
+            <div class="callout callout-teal"><strong>AI 只给建议</strong>最终分由教师确认，修改会写入本机记录。</div>
+            <div class="callout callout-warn"><strong>真实模型失败时</strong>自动回退到离线 mock，演示不中断。</div>
+            <div class="callout callout-danger"><strong>高风险求助</strong>只给转介建议，不自动回复、不诊断。</div>
+          </div>
+        </template>
+      </article>
+
+    </div>
+  </section>
+
+  <footer class="gallery-foot">
+    <div>
+      <strong>怎么用</strong>
+      <p>每张卡片展开“查看 HTML”，复制到你的页面，再把 <code>assets/base.css</code> 与 <code>assets/components.css</code> 引进去。</p>
+    </div>
+    <div class="gallery-links">
+      <a href="../index.html">打开工作台 →</a>
+      <a href="../SOURCES.md" target="_blank" rel="noopener">开源来源与许可证</a>
+    </div>
+  </footer>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite">
+  <i data-lucide="check-circle-2"></i><span id="toastText">已复制</span>
+</div>
+
+</body>
+</html>

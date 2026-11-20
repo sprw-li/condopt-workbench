@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 工作台自带的 runs 目录（每次跑都会变）
+state/
+
+# 验收脚本的运行产物：脚本入库可复跑，日志/截图/临时 runs 不入库
+_verify/logs/
+_verify/shots/
+_verify/_runs/
+_verify/__pycache__/
+
+# 截图只发布文档引用的那几张；其余每张约 300 KB
+web/_shots/*
+!web/_shots/preview_online.png
+!web/_shots/align_noflag_noflag.png
+!web/_shots/preview_truth_dialog.png
+!web/_shots/url_invalid_dialog.png
+!web/_shots/final_import_scenario.png
+
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.swp

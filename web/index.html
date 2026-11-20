@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>condopt 工作台</title>
+  <meta name="description" content="condopt 实验条件优化工作台：开工建议 → 下一批取样 → 结果回填 → 交付自查 → 看板。本地运行，无构建、无 CDN、无外网请求。">
+  <!-- favicon 用内联 data URI：不发起任何网络请求（上游同款；去掉 xmlns 以免源码里出现 URL 字样） -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231b2430'/%3E%3Cpath d='M7 24 L14 10 L20 24' fill='none' stroke='%2363c9b8' stroke-width='2.4'/%3E%3Ccircle cx='24' cy='11' r='3.2' fill='%23c2410c'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="./assets/base.css">
+  <link rel="stylesheet" href="./assets/components.css">
+  <link rel="stylesheet" href="./assets/app.css">
+  <script defer src="./vendor/marked.umd.js"></script>
+  <script defer src="./vendor/dompurify.min.js"></script>
+  <script defer src="./vendor/katex/katex.min.js"></script>
+  <script defer src="./vendor/katex/contrib/auto-render.min.js"></script>
+  <script defer src="./vendor/lucide.min.js"></script>
+  <script defer src="./vendor/confetti.browser.min.js"></script>
+  <script defer src="./assets/data.js"></script>
+  <script defer src="./assets/app.js"></script>
+  <!-- condopt 专属层：必须在 app.js 之后加载（改 EduKit.EduAPI.run / 挂表单与动作条） -->
+  <script defer src="./assets/condopt.js"></script>
+  <!-- 06 导入数据：路径→扫描→映射→二次确认外发→应用→落调参表单（CONTRACT §9） -->
+  <script defer src="./assets/import.js"></script>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ============================ 顶栏 ============================ -->
+  <header class="topbar">
+    <a class="brand" href="./index.html" aria-label="返回 condopt 工作台">
+      <span class="seal" aria-hidden="true">优</span>
+      <span class="brand-copy">
+        <strong id="brandName">condopt 工作台</strong>
+        <small id="brandClaim">算法是硬的，参数是活的，覆写必须留痕</small>
+      </span>
+    </a>
+
+    <nav class="nav" aria-label="主导航">
+      <a href="./index.html" class="is-active">工作台</a>
+      <a href="./components/index.html">组件库</a>
+      <a href="./ADAPTATION.md" target="_blank" rel="noopener">接入说明</a>
+    </nav>
+
+    <div class="top-actions">
+      <span class="mode-badge" id="modeBadge" title="后端连接状态：已连接时走真实 SSE；未连接时自动回退离线演示">
+        <i></i><span id="modeText">离线演示</span>
+      </span>
+      <button class="btn btn-ghost btn-icon hide-present" id="themeBtn" aria-label="切换深浅色" data-tip="深浅色">
+        <i data-lucide="moon"></i>
+      </button>
+      <button class="btn btn-ghost btn-sm hide-present" id="presentBtn" title="隐藏输入区，只留结果（Esc 退出）">
+        <i data-lucide="presentation"></i><span>演示视图</span>
+      </button>
+      <button class="btn btn-ghost btn-icon" id="helpBtn" aria-label="使用说明" data-tip="说明">
+        <i data-lucide="circle-help"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- ============================ 场景侧栏 ============================ -->
+  <aside class="rail">
+    <div class="rail-head">
+      <span class="kicker">闭环场景</span>
+      <span class="count" id="scenarioCount">05</span>
+    </div>
+    <nav id="scenarioList" aria-label="选择闭环场景"></nav>
+
+    <!-- condopt：study 列表 / run 选择（GET /api/runs，condopt.js 填充） -->
+    <div class="condopt-runs" id="condoptRuns" hidden>
+      <div class="rail-head">
+        <span class="kicker">study</span>
+        <button class="btn btn-ghost btn-sm" id="condoptReloadRuns" title="重新拉取 GET /api/runs">
+          <i data-lucide="refresh-cw"></i>
+        </button>
+      </div>
+      <select class="input condopt-run-select" id="condoptRunSelect" aria-label="选择 run"></select>
+      <p class="condopt-run-info" id="condoptRunInfo">—</p>
+    </div>
+
+    <div class="rail-foot">
+      <div class="path-card">
+        <span class="kicker">演示路径</span>
+        <p id="demoLine">填问卷 → 校验条件空间 → 路由算法 → 生成六段建议与 problem.json</p>
+      </div>
+      <div class="runtime" title="只绑 127.0.0.1；后端不在时自动回退离线演示">
+        <span class="dot"></span><span id="runtimeText">本机运行 · 数据不上传</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============================ 工作区 ============================ -->
+  <main class="workbench">
+
+    <!-- 输入 -->
+    <section class="panel input-panel" aria-label="输入区">
+      <header class="panel-head">
+        <span class="kicker" id="scenarioMeta">01 / 开工建议</span>
+        <h1 id="scenarioTitle">开工建议</h1>
+        <p class="tagline" id="scenarioTagline">六段开工建议：算法·停止·可行率·先验·交付口径·噪声处置</p>
+      </header>
+
+      <div class="panel-body">
+        <!-- condopt：结构化开工表单（字段由 GET /api/bootstrap 的 prepare_template 生成，不手写） -->
+        <div class="condopt-form" id="condoptForm" hidden>
+          <div class="condopt-form-head">
+            <span class="kicker">开工表单</span>
+            <span class="hint" id="condoptFormHint">字段由后端自动生成（模板加载中…）</span>
+          </div>
+          <div class="condopt-form-fields" id="condoptFormFields"></div>
+          <div class="condopt-form-foot">
+            <button class="btn btn-ghost btn-sm" id="condoptFormReset" type="button">
+              <i data-lucide="rotate-ccw"></i>按模板重置
+            </button>
+            <button class="btn btn-ghost btn-sm" id="condoptFormAddVar" type="button">
+              <i data-lucide="plus"></i>加一个变量
+            </button>
+            <span class="hint">表单与下面的 JSON 双向同步；表单没覆盖的字段（spec / constraints…）直接改 JSON。</span>
+          </div>
+        </div>
+
+        <!-- condopt §9：导入数据流程（路径→读取→列画像→映射确认→外发确认→应用），import.js 填充 -->
+        <div class="condopt-import" id="condoptImport" hidden></div>
+
+        <div class="field">
+          <div class="field-head">
+            <label for="input" id="inputLabel">问卷答案 answers.json</label>
+            <span class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 运行</span>
+          </div>
+          <textarea class="textarea" id="input" spellcheck="false" aria-label="输入内容"></textarea>
+          <div class="field-foot">
+            <span class="count" id="charCount">0 字</span>
+            <div class="field-tools">
+              <button class="btn btn-ghost btn-sm" id="sampleBtn"><i data-lucide="sparkles"></i>载入示例</button>
+              <button class="btn btn-ghost btn-sm" id="clearBtn">清空</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="attach-row">
+          <label class="attach-btn">
+            <i data-lucide="paperclip"></i><span>添加附件</span>
+            <input type="file" id="fileInput" multiple>
+          </label>
+          <span class="hint" id="filesHint">准备阶段不读附件：answers 校验通过后由 prepare 生成 space/context/objective。</span>
+        </div>
+        <div class="file-chips" id="fileChips"></div>
+
+        <div class="outputs" id="outputTags"></div>
+
+        <!-- condopt：闭环动作条（POST /api/action） -->
+        <div class="condopt-actions" id="condoptActions" hidden>
+          <span class="kicker">闭环动作</span>
+          <div class="condopt-action-row" id="condoptActionRow"></div>
+          <p class="hint" id="condoptActionHint">动作走 POST /api/action（结构化结果），上面的“开始处理”走 POST /api/run（流式观感）。</p>
+        </div>
+        <div class="condopt-result" id="condoptResult" hidden></div>
+
+        <div class="run-row">
+          <button class="btn btn-primary btn-run" id="runBtn">
+            <i data-lucide="sparkles"></i><span id="runBtnLabel">开始处理</span>
+          </button>
+          <div class="run-note">
+            <span class="dot"></span>
+            <span id="runNote"><strong>离线 mock</strong> · 可直接演示</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 输出 -->
+    <section class="panel output-panel" aria-label="输出区">
+      <header class="output-head">
+        <div class="output-top">
+          <div class="left">
+            <span class="kicker">LIVE OUTPUT</span>
+            <span class="badge" id="modePill">离线</span>
+            <span class="timer" id="timer"></span>
+          </div>
+          <div class="output-actions">
+            <button class="btn btn-ghost btn-icon" id="copyBtn" aria-label="复制 Markdown" data-tip="复制 Markdown" disabled>
+              <i data-lucide="copy"></i>
+            </button>
+            <button class="btn btn-ghost btn-icon" id="downloadBtn" aria-label="导出 .md" data-tip="导出 .md" disabled>
+              <i data-lucide="download"></i>
+            </button>
+            <button class="btn btn-ghost btn-icon" id="printBtn" aria-label="打印 / 存 PDF" data-tip="打印 / 存 PDF" disabled>
+              <i data-lucide="printer"></i>
+            </button>
+          </div>
+        </div>
+        <ol class="stages" id="stages" aria-label="处理阶段"></ol>
+      </header>
+
+      <div class="stream" id="stream" aria-live="polite">
+        <div class="empty" id="empty">
+          <div class="empty-mark" aria-hidden="true">∿</div>
+          <h2>下一批做什么条件，<br>由算法说；用不用，由人说。</h2>
+          <p>选一个闭环场景，点“开始处理”。你会看到四段处理推进、流式输出，以及最后一步留给人的拍板与留痕。没有后端时自动走离线演示，不会白屏。</p>
+          <div class="empty-steps">
+            <span><b>01</b> 开工</span>
+            <span><b>02</b> 取样</span>
+            <span><b>03</b> 回填</span>
+            <span><b>04</b> 交付</span>
+            <span><b>05</b> 看板</span>
+          </div>
+        </div>
+
+        <article class="md" id="md" hidden></article>
+        <div class="result-meta" id="resultMeta" hidden></div>
+
+        <!-- condopt §9：导入数据的模型建议 / 导入结果 / 算法子参数表（import 场景专用） -->
+        <section class="condopt-import-result" id="condoptImportResult" hidden></section>
+      </div>
+
+      <section class="review" id="review" hidden aria-label="人工拍板与留痕">
+        <div class="review-head">
+          <div class="review-title">
+            <span class="kicker">Human in the loop</span>
+            <h3>人工拍板 · 留痕</h3>
+            <span class="review-status" id="reviewStatus">待拍板</span>
+          </div>
+          <span class="hint" id="reviewHint">算法只给建议，覆写必须写理由</span>
+        </div>
+
+        <div class="review-grid">
+          <div class="score-box" id="scoreBox">
+            <span class="kicker" id="scoreLabel">AI 建议分</span>
+            <span class="score-value"><strong id="aiScore">62</strong><span id="scoreMax">/ 100</span></span>
+            <label class="final-score">最终分
+              <input class="input" id="finalScore" type="number" min="0" max="100" placeholder="待定">
+            </label>
+          </div>
+
+          <div class="review-fields">
+            <div class="decisions" id="decisions"></div>
+            <textarea class="review-note" id="reviewNote" placeholder="写一句拍板理由：改了什么、为什么（覆写算法时必填）。"></textarea>
+            <div class="quick-notes" id="quickNotes"></div>
+            <!-- condopt：覆写算法选择器（算法清单来自 GET /api/bootstrap，condopt.js 填充） -->
+            <div class="condopt-review-extra" id="condoptReviewExtra"></div>
+          </div>
+        </div>
+
+        <div class="review-foot">
+          <button class="btn btn-accent btn-sm" id="saveReview"><i data-lucide="check"></i>保存拍板留痕</button>
+          <span class="hint" id="reviewSaved">记录只保存在本机浏览器</span>
+          <span class="stamp" id="savedStamp" hidden>已拍板<span>REVIEWED</span></span>
+        </div>
+      </section>
+    </section>
+
+  </main>
+</div>
+
+<!-- ============================ 说明对话框 ============================ -->
+<dialog id="helpDialog">
+  <div class="dialog-head">
+    <div>
+      <span class="kicker">condopt · 工作台</span>
+      <h2>五场景闭环与适配说明</h2>
+    </div>
+    <button class="btn btn-ghost btn-icon" data-close aria-label="关闭"><i data-lucide="x"></i></button>
+  </div>
+  <div class="dialog-body">
+    <div class="dialog-grid">
+      <div class="dialog-card">
+        <strong>1. 开工建议</strong>
+        <p><code>prepare</code>：问卷 answers.json → 校验条件空间 → router 路由 → 六段建议（算法/停止/可行率/先验/交付口径/噪声）。</p>
+      </div>
+      <div class="dialog-card">
+        <strong>2. 下一批取样</strong>
+        <p><code>ask</code>：按当前观测给出下一批待测条件，自动带 plate/well/batch；pending 未回填时会报 E_CONFLICT。</p>
+      </div>
+      <div class="dialog-card">
+        <strong>3. 结果回填</strong>
+        <p><code>tell</code>：实测结果按 id 幂等写入 dataset；未知 id 报错不静默忽略；支持 JSON / CSV / TSV。</p>
+      </div>
+      <div class="dialog-card">
+        <strong>4. 交付自查</strong>
+        <p><code>delivery</code>：交付清单 + <code>check_integrity</code> + 收尾建议；推荐优先用确认复孔均值。</p>
+      </div>
+      <div class="dialog-card">
+        <strong>5. 看板</strong>
+        <p><code>render</code>：只读 run 目录生成单文件 dashboard.html（内联 SVG、无 CDN、无预测造假）。</p>
+      </div>
+      <div class="dialog-card">
+        <strong>6. 导入数据</strong>
+        <p>粘一个文件路径 → 扫描列画像 → 确认每列角色 → （可选）让模型读表 → 作先验导入并直接落到算法子参数表单。</p>
+      </div>
+      <div class="dialog-card">
+        <strong>离线兜底</strong>
+        <p>所有依赖在 <code>vendor/</code>；后端不可用时自动回退 <code>EduKit.mockRun</code>，页面不白屏，mock 文本均标注「离线演示」。</p>
+      </div>
+    </div>
+
+    <h3>唯一会出网的地方（CONTRACT §9.1）</h3>
+    <p>工作台默认完全离线。<strong>只有</strong>「导入数据 → 让模型读表」（<code>POST /api/import/map</code>）会外发，且必须同时满足
+      <code>--import-llm</code> 开关打开 <em>且</em> 环境变量里有密钥；外发前有二次确认弹窗，只发
+      <strong>表头 + 列画像 + 前 N 行样本</strong>（默认 12 行，上限 50），不发整文件。
+      未开启时返回 <code>E_LLM_UNAVAILABLE</code>，可一键改走离线规则映射（<code>fallback:"rules"</code>），<strong>不静默降级</strong>。
+      密钥只从环境变量读，不写盘、不回显、不进日志。</p>
+
+    <h3>接口（CONTRACT.md §2）</h3>
+    <pre class="code-block">GET  /api/bootstrap        首屏元数据（algorithms / prepare_template / scenarios）
+GET  /api/runs             已有 study 列表
+GET  /api/study?id=&lt;run&gt;  单个 study 快照
+POST /api/action           {"action":"prepare|init|ask|tell|delivery|render|override|step|recommend|report","run":null,"payload":{}}
+POST /api/run              SSE：meta → stage×4 → delta → （error）→ done</pre>
+    <p>SSE 帧格式与 EduKit 完全一致，前端解析器不改：<code>EduKit.parseSSE(response)</code>。<code>stage.index</code> 对应 <code>Scenario.stages[index]</code>。</p>
+
+    <h3>快捷键</h3>
+    <div class="shortcut-list">
+      <div><span>运行当前场景</span><span><kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>Enter</kbd></span></div>
+      <div><span>切换场景</span><span><kbd>1</kbd> – <kbd>6</kbd></span></div>
+      <div><span>演示视图</span><span><kbd>P</kbd></span></div>
+      <div><span>退出演示 / 关闭弹窗</span><span><kbd>Esc</kbd></span></div>
+    </div>
+
+    <h3>边界</h3>
+    <ul>
+      <li>离线 mock 是预置演示文本，不代表算法输出，也不含任何真实实验结论。</li>
+      <li>AI 只能从注册表里选算法、只能在参数 schema 里改参数；每次路由与覆写都写入 decisions.jsonl。</li>
+      <li>示例目标是合成/虚构数值；真实结论必须来自真实测量，禁止伪造实验数据。</li>
+      <li>服务只绑 127.0.0.1、无鉴权、无外网请求。</li>
+    </ul>
+  </div>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite">
+  <i data-lucide="check-circle-2"></i><span id="toastText">已保存</span>
+</div>
+
+<div class="present-bar">
+  <span>演示视图</span>
+  <kbd>Esc</kbd>
+  <span>退出</span>
+  <button class="btn btn-sm" id="exitPresent">退出</button>
+</div>
+
+</body>
+</html>
