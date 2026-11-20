@@ -52,7 +52,8 @@ ALLOWED_HOSTS = ("127.0.0.1", "localhost")
 WEB_ROOT = _HERE / "web"
 STATIC_PREFIXES = ("/assets/", "/vendor/", "/components/")
 GET_EXACT = ("/", "/api/bootstrap", "/api/runs", "/api/study")
-POST_EXACT = ("/api/action", "/api/run", "/api/import/scan", "/api/import/map", "/api/import/apply")
+POST_EXACT = ("/api/action", "/api/run", "/api/import/scan", "/api/import/map", "/api/import/apply",
+              "/api/kickoff/chat", "/api/kickoff/plan")
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
 _CONTENT_TYPES = {
@@ -166,7 +167,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             f"未知路径: {_display(path)}",
             "可用: /、/index.html、/assets/*、/vendor/*、/components/*、/api/bootstrap、"
             "/api/runs、/api/study、POST /api/action、POST /api/run、"
-            "POST /api/import/scan /map /apply",
+            "POST /api/import/scan /map /apply、POST /api/kickoff/chat /plan",
         )
         if path.startswith("/api/"):
             self._send_error(error)
@@ -294,19 +295,25 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
             self._handle_run()
             return
         if path == "/api/import/scan":
-            self._handle_import(
+            self._handle_envelope(
                 self.bridge.scan_import, {"path", "sample_rows", "model"}, pass_path=True
             )
             return
         if path == "/api/import/map":
-            self._handle_import(self.bridge.map_import, {"scan_id", "consent", "sample_rows", "model", "fallback"})
+            self._handle_envelope(self.bridge.map_import, {"scan_id", "consent", "sample_rows", "model", "fallback"})
             return
         if path == "/api/import/apply":
-            self._handle_import(
+            self._handle_envelope(
                 self.bridge.apply_import,
                 {"id", "path", "scan_id", "mapping", "algorithm", "params", "budget", "batch", "reason",
                  "count_toward_budget"},
             )
+            return
+        if path == "/api/kickoff/chat":
+            self._handle_envelope(self.bridge.kickoff_chat, {"messages", "state", "free_text"})
+            return
+        if path == "/api/kickoff/plan":
+            self._handle_envelope(self.bridge.kickoff_plan, {"state", "algorithm"})
             return
         if path in GET_EXACT or path.startswith(STATIC_PREFIXES):
             self._method_not_allowed("GET")
@@ -341,7 +348,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, {"ok": True, "action": action, "message": message, "result": result})
 
     # -- 导入已有数据（CONTRACT §9）----------------------------------------
-    def _handle_import(self, func, allowed: set, pass_path: bool = False) -> None:
+    def _handle_envelope(self, func, allowed: set, pass_path: bool = False) -> None:
         """三个导入端点共用的信封校验（未知字段不静默忽略）+ 错误映射。"""
         try:
             body = self._read_json_body()

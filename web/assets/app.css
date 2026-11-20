@@ -1083,3 +1083,333 @@ html[data-theme="dark"] {
   .condopt-consent-row { grid-template-columns: 1fr; }
   .condopt-params-grid, .condopt-import-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* ==========================================================================
+   版面缺陷修复（2026-11-21，_verify/geom_probe.py 归零判据）
+   上游 `.field{display:flex;flex-direction:column;flex:1;min-height:0}`：当 `.panel-body`
+   这一列里块变多（开工表 + JSON 域 + 附件行 + 本次产出 + 闭环动作 + 结果 + 运行行）时，
+   列方向剩余空间为负，`flex:1` 允许把 `.field` 压到 **0 高**，而它内部 `.textarea`
+   有 `min-height:230px` → 溢出（overflow 可见）并盖住 `.attach-row` / `.outputs` /
+   `#condoptActions`。实测：`.field h=0`、`#input × #condoptActions` 重叠 57126 px²。
+   修法：让 `.panel-body` 的直接子块**按内容高度排布**，不参与 flex 压缩（滚动交给
+   `.panel-body{overflow-y:auto}`）。这不是「只修一个块」——同结构的兄弟一起固定。
+   ========================================================================== */
+.panel-body > .field,
+.panel-body > .attach-row,
+.panel-body > .outputs,
+.panel-body > .condopt-form,
+.panel-body > .condopt-kickoff,
+.panel-body > .condopt-import,
+.panel-body > .condopt-advanced,
+.panel-body > .condopt-actions,
+.panel-body > .condopt-result,
+.panel-body > .run-row {
+  flex: 0 0 auto;
+}
+
+/* ---------------------------------------------------------- 高级抽屉（§10.4） */
+.condopt-advanced {
+  margin: 12px 0;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--paper-3) 45%, transparent);
+}
+.condopt-advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 12px;
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--ink-2);
+  list-style: none;
+}
+.condopt-advanced > summary::-webkit-details-marker { display: none; }
+.condopt-advanced > summary i { width: 14px; height: 14px; color: var(--muted); }
+.condopt-advanced > summary .hint { margin-left: auto; font-weight: 400; font-size: 10.5px; color: var(--muted); }
+.condopt-advanced[open] > summary { border-bottom: 1px solid var(--line); }
+/* 双保险：即使 JS 没跑到，收起状态的抽屉内容也不占版面（`hidden` 由 toggle 同步维护）。 */
+.condopt-advanced:not([open]) > .condopt-advanced-body { display: none; }
+.condopt-advanced-body { padding: 11px 12px 13px; }
+
+/* ---------------------------------------------------------- 对话式开工（§10.1） */
+.condopt-kickoff {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 2px 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--line) 60%, transparent);
+}
+.condopt-kickoff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 13px 9px;
+  border-bottom: 1px solid var(--line);
+}
+.condopt-kickoff-head .kicker { color: var(--accent); }
+.condopt-kickoff-step {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.condopt-chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 13px 4px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.condopt-bubble { display: flex; flex-direction: column; gap: 4px; max-width: 92%; }
+.condopt-bubble.is-user { align-self: flex-end; align-items: flex-end; }
+.condopt-bubble.is-assistant { align-self: flex-start; }
+.condopt-bubble-who { font-size: 9.6px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.condopt-bubble-text {
+  padding: 9px 11px;
+  border-radius: 12px;
+  font-size: 12.2px;
+  line-height: 1.68;
+  color: var(--ink);
+  background: var(--paper-3);
+  border: 1px solid var(--line);
+}
+.condopt-bubble.is-user .condopt-bubble-text {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--line));
+}
+.condopt-bubble-text p { margin: 0 0 6px; }
+.condopt-bubble-text p:last-child { margin-bottom: 0; }
+.condopt-bubble-text strong { font-weight: 700; }
+.condopt-bubble-text code {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.condopt-bubble-why {
+  font-size: 10.6px;
+  line-height: 1.6;
+  color: var(--muted);
+  padding-left: 9px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
+/* 快捷回复芯片 */
+.condopt-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 13px 10px; }
+.condopt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line));
+  border-radius: 999px;
+  background: var(--paper-2);
+  color: var(--accent);
+  font-size: 11.4px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s, transform .15s;
+}
+.condopt-chip:hover { background: var(--accent-soft); transform: translateY(-1px); }
+.condopt-chip:disabled { opacity: .5; cursor: default; transform: none; }
+.condopt-chip i { width: 13px; height: 13px; }
+
+/* 底部输入 */
+.condopt-chat-input {
+  display: flex;
+  gap: 7px;
+  padding: 9px 13px 12px;
+  border-top: 1px solid var(--line);
+}
+.condopt-chat-input .input { flex: 1; min-width: 0; }
+.condopt-chat-note { padding: 0 13px 11px; font-size: 10.4px; color: var(--muted); }
+.condopt-chat-typing { padding: 0 13px 10px; font-size: 10.6px; color: var(--accent); }
+
+/* ---------------------------------------------------------- 算法选项链接卡（§10.1） */
+.condopt-options { display: flex; flex-direction: column; gap: 8px; padding: 2px 13px 12px; }
+.condopt-options-head { font-size: 10.6px; color: var(--muted); }
+.condopt-opt-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s, transform .15s;
+}
+.condopt-opt-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--accent) 12%, transparent);
+  transform: translateY(-1px);
+}
+.condopt-opt-card.is-recommended {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 55%, var(--paper));
+}
+.condopt-opt-top { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.condopt-opt-title { font-size: 12.6px; font-weight: 700; color: var(--ink); }
+.condopt-opt-one { display: block; margin-top: 4px; font-size: 11.5px; line-height: 1.6; color: var(--ink-2); }
+.condopt-opt-why { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+.condopt-opt-why span {
+  font-size: 10.2px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--ink-2);
+}
+.condopt-opt-tradeoff { display: block; margin-top: 6px; font-size: 10.6px; line-height: 1.55; color: var(--gold); }
+.condopt-opt-go {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 10.8px;
+  font-weight: 650;
+  color: var(--accent);
+}
+.condopt-opt-go i { width: 12px; height: 12px; }
+.condopt-badge-rec {
+  font-size: 9.6px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--paper-2);
+}
+.condopt-badge-risk { font-size: 9.6px; padding: 2px 6px; border-radius: 999px; background: color-mix(in srgb, var(--ink) 8%, transparent); color: var(--muted); }
+.condopt-badge-risk.is-low { color: var(--accent); }
+.condopt-badge-risk.is-medium { color: var(--gold); }
+.condopt-badge-risk.is-high { color: var(--danger); }
+
+/* ---------------------------------------------------------- 算法参数页（§10.3，右栏） */
+.condopt-kickoff-plan { display: flex; flex-direction: column; gap: 11px; }
+.condopt-plan-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.condopt-plan-why {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  background: var(--accent-soft);
+  font-size: 11.6px;
+  line-height: 1.7;
+  color: var(--ink-2);
+}
+.condopt-plan-why strong { color: var(--ink); }
+.condopt-plan-why ul { margin: 5px 0 0; padding-left: 17px; }
+.condopt-plan-why li { margin: 2px 0; }
+.condopt-plan-note { font-size: 10.5px; color: var(--muted); line-height: 1.6; }
+.condopt-plan-warnings {
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--gold) 40%, var(--line));
+  background: var(--gold-soft);
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+.condopt-plan-warnings.is-costly {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.condopt-plan-warnings ul { margin: 4px 0 0; padding-left: 17px; }
+.condopt-chat-missing {
+  margin: 0 13px 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--gold-soft);
+  font-size: 10.6px;
+  color: var(--ink-2);
+}
+.condopt-opt-card.is-disqualified {
+  opacity: .58;
+  background: color-mix(in srgb, var(--paper-3) 55%, var(--paper));
+  border-style: dashed;
+}
+.condopt-opt-card.is-disqualified:hover { opacity: .85; }
+.condopt-param-group { display: flex; flex-direction: column; gap: 8px; }
+.condopt-param {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: 7px 11px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+  align-items: start;
+}
+.condopt-param-label { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.condopt-param-label strong { font-size: 12px; color: var(--ink); }
+.condopt-param-name { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+.condopt-param-plain { display: block; margin-top: 3px; font-size: 10.8px; line-height: 1.6; color: var(--ink-2); }
+.condopt-param-default { display: block; margin-top: 4px; font-size: 10.3px; color: var(--muted); }
+.condopt-param-default code { font-family: var(--mono); }
+.condopt-param-control { display: flex; flex-direction: column; gap: 4px; }
+.condopt-param-control .input { width: 100%; }
+.condopt-param-check { display: flex; align-items: center; gap: 6px; font-size: 11.4px; color: var(--ink-2); }
+.condopt-impact { font-size: 9.6px; font-weight: 700; padding: 2px 6px; border-radius: 999px; }
+.condopt-impact.is-high { background: var(--danger-soft); color: var(--danger); }
+.condopt-impact.is-medium { background: var(--gold-soft); color: var(--gold); }
+.condopt-impact.is-low { background: color-mix(in srgb, var(--ink) 7%, transparent); color: var(--muted); }
+.condopt-advanced-params {
+  border: 1px dashed var(--line-2);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--paper-3) 40%, transparent);
+}
+.condopt-advanced-params > summary {
+  padding: 8px 11px;
+  cursor: pointer;
+  font-size: 11.2px;
+  font-weight: 650;
+  color: var(--ink-2);
+  list-style: none;
+}
+.condopt-advanced-params > summary::-webkit-details-marker { display: none; }
+.condopt-advanced-params > summary .hint { margin-left: 7px; font-weight: 400; font-size: 10.4px; color: var(--muted); }
+.condopt-advanced-params-body { padding: 0 11px 11px; display: flex; flex-direction: column; gap: 8px; }
+.condopt-plan-build {
+  display: flex;
+  align-items: flex-end;
+  gap: 9px;
+  flex-wrap: wrap;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--paper-2);
+}
+.condopt-plan-build .condopt-inline { flex: 0 0 auto; }
+.condopt-run-semantics {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent-soft) 60%, var(--paper));
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+}
+.condopt-run-semantics .condopt-stat { background: var(--paper-2); }
+.condopt-kickoff-offline {
+  margin: 0 13px 12px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--gold) 40%, var(--line));
+  background: var(--gold-soft);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+@media (max-width: 680px) {
+  .condopt-param { grid-template-columns: 1fr; }
+  .condopt-chat-log { max-height: 38vh; }
+}

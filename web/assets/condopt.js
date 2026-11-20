@@ -158,7 +158,13 @@
     if (!response.ok || !data || data.ok === false) {
       const code = data && data.error ? data.error + " · " : "";
       const hint = data && data.hint ? "（" + data.hint + "）" : "";
-      throw new Error(code + ((data && data.message) || ("HTTP " + response.status)) + hint);
+      const error = new Error(code + ((data && data.message) || ("HTTP " + response.status)) + hint);
+      // 保留结构化字段：调用方（如 kickoff.js 判断 init 是否拒收 params）不该去正则解析错误文本。
+      error.code = (data && data.error) || ("HTTP_" + response.status);
+      error.hint = (data && data.hint) || "";
+      error.status = response.status;
+      error.raw = data;
+      throw error;
     }
     return data;
   }
@@ -855,15 +861,27 @@
     if (!scenario) return;
 
     const isKickoff = scenario.action === "prepare";
+    const isImport = scenario.action === "import";
     const form = $("condoptForm");
     if (!isKickoff && form) form.hidden = true;
 
+    // §10：01 场景首屏 = 对话（kickoff.js）；旧的 45 字段表单降级进「高级」抽屉
+    const kickoffBox = $("condoptKickoff");
+    const advanced = $("condoptAdvanced");
+    if (advanced) advanced.hidden = !isKickoff;
     if (isKickoff) {
+      if (window.CONDOPT_KICKOFF) window.CONDOPT_KICKOFF.render();
+      // 高级抽屉里的 JSON 仍与表单双向同步（旧能力不删），但只在需要时渲染表单
       const input = $("input");
       const parsed = input ? parseJsonObject(input.value) : null;
       state.formModel = parsed || (state.template ? JSON.parse(JSON.stringify(state.template)) : {});
-      renderForm();
+      if (advanced && advanced.open) renderForm();
+    } else if (window.CONDOPT_KICKOFF) {
+      window.CONDOPT_KICKOFF.hide();
     }
+    // 06 场景有自己的结果区；切走时把它收起来，避免两个面板同时显示
+    const importResult = $("condoptImportResult");
+    if (importResult && !isImport) importResult.hidden = true;
 
     renderActions(scenario);
     renderReviewExtra();
@@ -931,6 +949,24 @@
         if (remove) { removeVariableRow(Number(remove.dataset.removeRow)); return; }
         if (event.target.closest("#condoptFormReset")) { resetFormFromTemplate(); return; }
         if (event.target.closest("#condoptFormAddVar")) { addVariableRow(); }
+      });
+    }
+
+    // §10.4：旧的 45 字段表单收进「高级：直接改 answers JSON」抽屉，**首次打开时才渲染**
+    // （省掉首屏 1500px 的隐藏 DOM；旧能力一个不少，只是不再铺在最前面）。
+    const advanced = $("condoptAdvanced");
+    if (advanced) {
+      advanced.addEventListener("toggle", () => {
+        // 关闭的 <details> 在 Chromium 里只是 content-visibility:hidden —— 内容**仍占版面**
+        // （实测 .condopt-advanced-body 仍是 317.8px 高的一块，压在 .attach-row/#condoptActions 上）。
+        // 所以显式用 `hidden` 让它真正不参与布局（_verify/geom_probe.py 也据此跳过）。
+        const body = $("condoptAdvancedBody");
+        if (body) body.hidden = !advanced.open;
+        if (!advanced.open) return;
+        const kickoffForm = $("condoptForm");
+        if (kickoffForm) kickoffForm.hidden = false;
+        renderForm();
+        refreshIcons();
       });
     }
 
@@ -1054,6 +1090,13 @@
     },
     // 供 import.js 复用「人工拍板 · 留痕」面板（避免复制一份复核区渲染逻辑）
     openReviewPanel,
+    // 供 kickoff.js 复用唯一写路径：POST /api/action（§10.4：对话只是攒 answers 的另一种入口）
+    action: postAction,
+    setOnline,
+    // 供 kickoff.js 在自身加载完成后重跑一次场景同步：
+    // defer 脚本按顺序执行，condopt.js 的 boot() 首次 syncScenario() 时 kickoff.js 还没执行，
+    // 否则「01 首屏是聊天」会晚到（bootstrap 失败时甚至永远不来）。
+    resync: () => syncScenario(),
     state,
     refreshRuns,
     refreshStudy,

@@ -30,6 +30,8 @@ py -3 server.py --runs-dir runs        # 直接操作仓库现有 study
 | `web/index.html` | **改写**（新增/替换产品壳） | condopt 产品名与导航；保留顶栏 / 场景侧栏 / 结果区 / 复核区骨架、演示视图、深浅色、快捷键；新增 condopt 区块（study 列表 / 开工表单挂载点 / 动作条 / 覆写选择器） |
 | `web/assets/data.js` | **替换内容** | 四个教育场景 → condopt 五场景（key 与顺序固定：`kickoff` `sample` `feedback` `delivery` `board`）；`stages` 与 CONTRACT §4.1 权威表一字不差 |
 | `web/assets/condopt.js` | **新增** | condopt 专属层：`EduAPI.run` → `POST /api/run`、开工表单（模板投影）、study 列表、闭环动作条、人工拍板/覆写留痕 |
+| `web/assets/import.js` | **新增**（task-9 / §9） | 06 导入数据：路径→scan→列画像→映射确认→外发二次确认→apply→落调参表单（`CONDOPT_IMPORT`） |
+| `web/assets/kickoff.js` | **新增**（task-14 / §10） | 01 对话式开工：聊天窗 + 快捷回复芯片 + 算法选项链接卡 + 参数页（`CONDOPT_KICKOFF`） |
 | `web/assets/app.js` | **7 处加钩子** | 见 §2；不改任何上游渲染逻辑，没有 condopt.js 时行为与上游一致 |
 | `web/assets/app.css` | **追加覆盖段** | 品牌变量 + condopt 区块布局；上游 1–728 行原样保留 |
 | `web/ADAPTATION.md` | **新增** | 本文件 |
@@ -358,7 +360,136 @@ scan.warnings        = […, "模型网关地址配置不合法：模型网关�
 共 66 条断言（29+24+13）。其中「外发前必须二次确认」是用 stub 侧计数器证明的：
 **弹窗打开期间 `map_calls == 0`**，勾选并确认后才变成 1，且 `consent=true`。
 
-## 8. 未决 / 需要注意
+## 8. 场景 01「对话式开工」（task-14，CONTRACT §10）
+
+需求方原话：「直接开一个 agent 聊天窗讲清楚具体情况……应该 agent 回话并自动把可选的条件优化算法
+以数个链接的方式呈现，最后再点进去要调参数的界面在他的解释下调参数。」
+现状问题：01 原来是一张 **45 字段表单**（`prepare_template` 全量投影），门槛放在最前面。
+
+### 8.1 新增 / 改动的文件
+
+| 文件 | 动作 |
+|---|---|
+| `web/assets/kickoff.js` | **新增**：`window.CONDOPT_KICKOFF`（聊天 + 选项卡 + 参数页 + 建 study + 生成下一批） |
+| `web/index.html` | 新增挂载点 `#condoptKickoff`（左栏·聊天）、`#condoptKickoffPlan`（右栏·参数页）；旧表单 + answers JSON 收进 `<details id="condoptAdvanced">`（默认收起，内容默认 `hidden`）；加载 `kickoff.js` |
+| `web/assets/condopt.js` | `syncScenario()` 对 `action==="prepare"` 转发 `CONDOPT_KICKOFF.render()` / `hide()`；抽屉 `toggle` 时懒渲染旧表单；导出 `action`/`setOnline`/`resync`；`postAction` 抛错时保留 `code/hint/status` |
+| `web/assets/app.css` | 追加聊天/芯片/选项卡/参数页样式 + **版面缺陷修复段**（见 §9） |
+
+`app.js` **本任务未改**（10 个钩子不变）；旧「开工表单」的全部能力保留，只是不再首屏铺开。
+
+### 8.2 交互与数据流
+
+- **左栏首屏 = 聊天**：助手气泡（markdown）+「为什么问这个」+ 快捷回复芯片 + 输入框。
+  芯片点一下就答（`content` 发**芯片的标签文本**，后端按标签精确匹配，实测可用，且聊天记录里显示的是用户
+  真正说过的话而不是 JSON 串）；手打输入**带 `free_text:true`**（后端仅在此模式启用规则解析）。
+- **`state` 原样回传**：`state` 只被保存与送回，前端不解析、不拼装。
+  唯一例外是**首轮不带 `state`**：契约说 state 是「上一轮原样回传」，首轮没有上一轮；实测
+  `state:{}` 会被后端判 422（`state.step 非法: 'None'`），省略才是「开新对话」。
+  `state.missing` 是后端只读提示，只在界面上显示（「还缺：…」），**从不回写**。
+- **第 5 轮后 = 算法选项链接卡**（`step==="options"`）：2–4 张 `<button>` 卡，
+  含标题 / 一句话 / 为什么（why 标签）/ 取舍 / `recommended` 标记 / `risk`；
+  `disqualified:true`（router 规则判死、分数 ≤ −100）**置灰但照常列出**（列出来本身就是解释价值），
+  带「规则判死（不推荐）」标记且仍可点进去看参数。
+- **点卡 → 右栏参数页**（`POST /api/kickoff/plan`）：
+  顶部是 `why`（router 依据）+「助手为什么推荐它」；参数表用 `label` + `plain`（人话）+
+  默认值 / 范围 + `impact` 徽章（影响：大/中/小）+ 按 `type` 渲染控件（choice→select、
+  bool→checkbox、int/float→number、其余→text）；`advanced:true` 收进默认折叠的「高级参数」；
+  `display_source==="registry"` 的参数标「说明来自算法库」（不把回落文案伪装成工作台元数据）；
+  `warnings` 在独立框里**照实显示**，含 `spec_score` 的那条标成红框「真代价，不是噪音」。
+- **建 study**：底部 `POST /api/action {init}`（与开工表单同一条写路径），成功后显示
+  「study / 算法 / n_obs / 剩余预算 + 与导入数据、结果回填同一套 run 语义」，并给「生成下一批」
+  （`ask`）与「去下一批取样场景」。
+- **降级**：`/api/kickoff/*` 404/405/网络失败 → 明确写出原因（例如「后端还没有 /api/kickoff/chat
+  （HTTP_501）」）+ 内置离线演示（示例对话 / 示例选项 / 示例参数，并**标明不是 registry**），不白屏。
+
+### 8.3 真端点实测（`py -3 server.py`，30+6 项断言）
+
+```
+kickoff（真后端）          36/36
+kickoff/offline（纯静态）   9/9    ← 无任何 /api 也不白屏
+kickoff/params → 磁盘      7/7    ← 参数页改动落到 runs/<id>/config.json（见 §8.4）
+```
+覆盖：首屏是聊天而不是表单 / 助手说人话（「越大越好还是越小越好」，无 `direction` 术语）/
+芯片 ≥2 / 5 轮内收敛到 `options` 且 2–4 张卡 / 卡片字段齐全 / 唯一 `recommended` /
+参数页解释 + `label`+`plain` + `impact` + 控件类型 + `advanced` 默认折叠 /
+建 study 成功并显示 run 语义 / 生成下一批 / 旧表单仍在抽屉里可开 /
+`disqualified` 置灰不下架 / `spec_score` 警告红框显示 / 无 `console.error`、无未捕获异常。
+
+截图：`_shots/kickoff_1_chat.png`（首屏聊天）、`kickoff_2_options.png`（选项卡）、
+`kickoff_3_plan.png`（参数页）、`kickoff_4_built.png`、`kickoff_5_next.png`、
+`kickoff_6_advanced.png`、`kickoff_7_disqualified.png`、`kickoff_8_spec_warning.png`、
+`kickoff_offline_1_chat.png` … `kickoff_offline_3_plan.png`。
+
+### 8.4 `init` 的 `params`（task-15 已落地，端到端验证到磁盘）
+
+契约 §10.4 说 `payload:{answers, algorithm, params}`。历史经过：先实测当前后端 `init` 白名单
+只有 `['algorithm','answers','batch','budget','id']` → 带 `params` 会 422「init 的 payload 未知字段: params」；
+lead 裁定「必须支持」并开 task-15。**task-15 已落地**，前端现在的行为：
+
+- 发的 `params` 是**平表** `{参数名: 值}`（`readParams()` 直接收集参数页控件值，不嵌套、不按算法分组）；
+- 后端规则「`algorithm:"auto"` + 非空 params → 422」：前端建 study 时用 `plan.algorithm` 解析出的
+  **具体算法名**；万一拿不到具体算法，宁可不带 `params`（并在参数页说明），也不发注定 422 的组合；
+- **兼容 task-15 之前的后端**：若仍回 `E_VALIDATION` 且点名 `params`，就退回不带 `params` 建 study，
+  并在参数页**红字告知**「你改的算法子参数没有写进 study」（不静默、不假装成功）。这条兜底按要求保留，
+  现在是不会触发的死路径，但换回旧后端仍然诚实。
+
+**端到端验证（不是只看响应，直接读磁盘）**：参数页把 `kernel` 改成 `rbf`、`alpha` 改成 `0.05` → 建 study →
+读 `runs/kickoff-params-landing/config.json`：
+
+```
+"params": { "kernel": "rbf", "alpha": 0.05, "length_scale": 0.3, "ard": true, ... }   ← 与 UI 传入逐字一致
+"algorithm": "bayes"（具体名，非 auto）
+```
+UI 侧断言 7/7：`plan` 解析出具体算法 / 两个控件改动被收集 / 无「参数没写进去」红字 /
+`sentParams` 平表含改动值 / 该次建 study 的 run 语义正常。截图 `kickoff_9_params_landed.png`。
+
+**另一条已确认的细节**：chip 的 `value` 可以放在 `messages[].content` 里（对象或标签文本后端都认）。
+前端选了**标签文本**（聊天记录可读，且实测被精确匹配）；纯文本规则解析只在 `free_text:true` 时启用，
+所以手打输入框必带该标记。若后端将来只认 `value`，这里要改成把 `value` 序列化进 `content`。
+
+## 9. 版面缺陷修复（`_verify/geom_probe.py` 归零）
+
+**症状**（lead 用 DOM 几何量出来的，不是截图错觉）：`.field` 被压成 **0 高**，内部 `textarea`
+（`min-height:230px`）溢出并盖住后继兄弟：
+
+```
+.field              h=   0.0     ← 被压成 0 高
+#input              h= 230.0     ← 子元素溢出
+实测重叠：#input × #condoptActions 面积 57126，#input × .attach-row 15527
+```
+
+**根因**：上游 `.panel-body{display:flex;flex-direction:column;flex:1;min-height:0;overflow-y:auto}`
+配 `.field{flex:1;min-height:0}`。`.panel-body` 里块变多（开工表 + JSON 域 + 附件行 + 本次产出 +
+闭环动作 + 结果 + 运行行）后列方向剩余空间为负，`flex:1` + `min-height:0` 允许把 `.field` 压到 0，
+而它内部 `textarea` 有 `min-height` → 溢出（`overflow` 可见）压住兄弟。
+
+**修法**（追加覆盖段，不改上游行）：
+
+```css
+.panel-body > .field, .panel-body > .attach-row, .panel-body > .outputs,
+.panel-body > .condopt-form, .panel-body > .condopt-kickoff, .panel-body > .condopt-import,
+.panel-body > .condopt-advanced, .panel-body > .condopt-actions, .panel-body > .condopt-result,
+.panel-body > .run-row { flex: 0 0 auto; }
+```
+
+**同类的第二个坑**（自己发现）：关闭的 `<details>` 在 Chromium 里只是 `content-visibility:hidden`
+——内容**仍然占版面**（实测 `.condopt-advanced-body` 仍是 317.8px 高的一块，压在
+`.attach-row`/`#condoptActions` 上）。所以抽屉收起时把内容体**显式 `hidden`**（`toggle` 同步 +
+CSS `:not([open])` 双保险），让它真正不参与布局。
+
+**回归判据（原文输出见 task-14 汇报）**：
+
+```
+py -3 _verify\geom_probe.py
+  → zero-size boxes: 0 / suspicious overlaps: 0 / exit 0
+```
+另加两态自检（探针看不到「抽屉打开」态，因为它是折叠的）：
+`closed` 与 `open` 都 **0 零尺寸 / 0 可疑重叠**，截图 `layout_fix_1_closed.png`、
+`layout_fix_2_advanced_open.png`。`_verify/geom_probe.py` 的 `sel` 里追加了 §8 的新容器选择器
+（`#condoptKickoff` / `#condoptKickoffPlan` / `#condoptAdvanced` / `.condopt-advanced-body`），
+**判定逻辑一字未改**。
+
+## 10. 未决 / 需要注意
 
 **task-9 的 4 个未决问题已由 lead 裁定并写进契约（2026-11-20 14:05），前端已对齐：**
 

@@ -200,7 +200,7 @@ WRITE_ACTIONS = frozenset({"init", "ask", "tell", "override", "render"})
 #: 每个 action 允许的 payload 字段。未知字段**不静默忽略**（契约 §3）。
 ACTION_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "prepare": frozenset({"answers"}),
-    "init": frozenset({"id", "answers", "algorithm", "budget", "batch"}),
+    "init": frozenset({"id", "answers", "algorithm", "budget", "batch", "params"}),
     "ask": frozenset({"n", "plate"}),
     "tell": frozenset({"observations", "csv"}),
     "step": frozenset(),
@@ -896,6 +896,58 @@ class Bridge:
             raise _local_condopt_error(exc) from exc
 
     # -- 各动作实现 ---------------------------------------------------------
+    def _check_init_params(self, algorithm: str, raw: Any) -> dict | None:
+        """``init.params`` 校验（CONTRACT §3 / §10.4 裁定）。
+
+        形状是**平表** ``{参数名: 值}``（同 CLI ``--params`` / ``Study.create(params=…)``）；
+        未知键与非法值都 **422 并点名**，绝不静默忽略——否则「参数页调完参却没生效」
+        就是用户可见的假生效。``{}`` 视为不传（与旧行为一致）。
+        """
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise WorkbenchError(
+                E_VALIDATION,
+                "params 必须是平表对象 {参数名: 值}",
+                '例如 {"kernel": "rbf"}；不要嵌套、不要按算法名分组',
+            )
+        nested = sorted(str(key) for key, value in raw.items() if isinstance(value, (Mapping, list, tuple)))
+        if nested:
+            raise WorkbenchError(
+                E_VALIDATION,
+                f"params 必须是平表，这些键的值是嵌套结构: {_display_list(nested)}",
+                '例如 {"kernel": "rbf"}；不要嵌套、不要按算法名分组',
+            )
+        params = {str(key): value for key, value in raw.items()}
+        if not params:
+            return None
+        if algorithm == "auto":
+            raise WorkbenchError(
+                E_VALIDATION,
+                "algorithm=auto 时不能指定算法参数（auto 路由自己决定算法，其参数由算法默认值接管）",
+                "先选定算法：用具体算法名（例如 bayes），"
+                "或先 POST /api/kickoff/plan 拿到推荐算法；建好后要换算法/参数可用 override 动作",
+            )
+        described = {
+            str(item.get("name")) for item in (condopt_registry.describe(algorithm).get("params") or [])
+        }
+        unknown = sorted(key for key in params if key not in described)
+        if unknown:
+            raise WorkbenchError(
+                E_VALIDATION,
+                f"params 含 {algorithm} 没有的参数: {_display_list(unknown)}",
+                f"{algorithm} 可调参数: {sorted(described)}",
+            )
+        try:
+            condopt_registry.validate_params(algorithm, params)
+        except (ValueError, TypeError, CondoptError) as exc:
+            raise WorkbenchError(
+                E_VALIDATION,
+                f"params 取值不合法: {exc}",
+                f"取值必须来自 {algorithm} 的 ParamSpec 元数据（见 /api/kickoff/plan 的 params）",
+            ) from exc
+        return params
+
     def _do_init(self, payload: dict) -> tuple[str, dict]:
         answers = dict(payload["answers"])
         run_id = str(payload["id"]).strip()
@@ -907,6 +959,7 @@ class Bridge:
                 f"未知算法: {algorithm}",
                 f"可用: auto, {', '.join(condopt_registry.names())}",
             )
+        params = self._check_init_params(algorithm, payload.get("params"))
         with self._lock:
             if Study.exists(run_dir):
                 raise WorkbenchError(
@@ -935,7 +988,7 @@ class Bridge:
                     space=space,
                     objective=objective,
                     algorithm=algorithm,
-                    params=None,
+                    params=params,
                     seed=0,
                     context=context,
                     budget=budget,
@@ -1560,6 +1613,400 @@ class Bridge:
                 f"原始响应前 500 字符: {body[:500]}",
             ) from exc
         return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+
+    # -- 对话式开工（CONTRACT §10）------------------------------------------
+    def _kickoff_context_from_answers(self, answers: Mapping) -> tuple:
+        """answers → (space, objective, context, route 结果)；沿用 prepare 的解析路径。"""
+        try:
+            condopt_validate_answers(answers)
+            space, objective, context = condopt_prepare.parse_answers(answers)
+            recommendation = condopt_route(context)
+        except CondoptError as exc:
+            raise _local_condopt_error(exc) from exc
+        except KeyError as exc:
+            raise WorkbenchError(E_VALIDATION, f"answers 字段错误: {exc}", "先用 /api/kickoff/chat 攒出 answers") from exc
+        except (ValueError, TypeError) as exc:
+            raise WorkbenchError(E_VALIDATION, str(exc), "先用 /api/kickoff/chat 攒出 answers") from exc
+        return space, objective, context, recommendation
+
+    def _kickoff_answers_for_init(self, answers: Mapping) -> tuple[dict, list[str]]:
+        """把 state.answers 收敛成「可直接喂给 ``POST /api/action {init}``」的形状。
+
+        带硬约束时 condopt 只能走 ``spec`` 路径（prepare 的 ``constraints`` 只是**数量**），
+        这里显式转入 spec 并在 warnings 里说清目标名会变成 ``spec_score``。
+        """
+        cleaned = json.loads(json.dumps(_to_jsonable(answers), ensure_ascii=False))
+        warnings: list[str] = []
+        cleaned.pop("constraint_items", None)
+        cleaned.pop("defer_to_import", None)
+        cleaned["batch"] = int(cleaned.get("batch") or KICKOFF_DEFAULT_BATCH)
+        cleaned.setdefault("noise", "medium")
+        cleaned.setdefault("smoothness", "mixed")
+        cleaned.setdefault("domain", "generic")
+        cleaned.setdefault("prior", 0)
+        cleaned.setdefault("notes", "由对话式开工生成（CONTRACT §10）")
+
+        items = [item for item in (answers.get("constraint_items") or []) if isinstance(item, Mapping)]
+        if items:
+            objective = cleaned.get("objective") or {}
+            # 硬约束只能由 spec.constraints 表达；目标**不**复制成额外 goal——
+            # 那会悄悄改变标量化分数（把约束指标也当成要最大化的目标）。
+            metrics = [{"metric": str(objective.get("name")), "mode": str(objective.get("direction") or "max")}]
+            limits = {
+                str(item["metric"]): {"op": str(item.get("op") or ">="), "value": float(item.get("value") or 0.0)}
+                for item in items
+                if item.get("metric")
+            }
+            cleaned["spec"] = {"goals": metrics, "constraints": limits}
+            cleaned["constraints"] = len(limits)
+            warnings.append(
+                "你给了硬约束：condopt 只有 spec 路径能表达「指标 + 比较符 + 阈值的硬约束」，"
+                "所以 answers 里会带 spec；代价是 study 的目标列名为 spec_score"
+                "（真实目标与约束都写在 spec.goals / spec.constraints 里）。"
+            )
+        else:
+            cleaned.pop("spec", None)
+            cleaned["constraints"] = int(cleaned.get("constraints") or 0)
+        warnings.append(
+            f"对话没有问 batch，默认 batch={KICKOFF_DEFAULT_BATCH}（可在参数页的「高级 answers JSON」里改）。"
+        )
+        return cleaned, warnings
+
+    def _kickoff_options(self, answers: Mapping) -> tuple[list[dict], str, list, dict]:
+        """选项生成：用 router 的**真实打分**排序；recommended 必须是 router 选中的那个。"""
+        # 先收敛成 init 会收到的同一份 answers（去掉 constraint_items 这类内部键、
+        # 带约束时转入 spec），保证「路由看到的上下文 == init 会建的 study」。
+        routable, _ = self._kickoff_answers_for_init(answers)
+        space, objective, context, recommendation = self._kickoff_context_from_answers(routable)
+        route_payload = _to_jsonable(recommendation.to_dict())
+        scores = route_payload.get("candidate_scores") or {}
+        picked = str(route_payload.get("algorithm") or "")
+        alternatives = {
+            str(item.get("algorithm")): item for item in (route_payload.get("alternatives") or [])
+        }
+        # -165 这类是被规则判死的档位（不是「第二好」），别拿来当可选项。
+        qualified = [
+            str(name) for name, score in scores.items()
+            if isinstance(score, (int, float)) and float(score) > -100 and str(name) != picked
+        ]
+        qualified.sort(key=lambda name: float(scores.get(name, 0.0)), reverse=True)
+        order = [picked, *qualified]
+        for name in alternatives:
+            if name not in order:
+                order.append(name)
+        order = [name for name in order if name in condopt_registry.names()]
+        order = order[:4] if len(order) >= 2 else order
+        if len(order) < 2:
+            raise WorkbenchError(
+                E_VALIDATION,
+                "当前 answers 只能路由出一个可用算法，给不出 2 个以上选项",
+                "回到对话补全条件变量/预算后再试",
+            )
+        options: list[dict] = []
+        for name in order:
+            display = _algorithm_display(name)
+            if name == picked:
+                why = list(route_payload.get("rationale") or [])
+            else:
+                alternative = alternatives.get(name) or {}
+                why = [str(alternative.get("why"))] if alternative.get("why") else []
+            if not why:
+                described = {item["name"]: item for item in condopt_registry.describe_all()}.get(name, {})
+                when = str(described.get("when") or "")
+                why = [when] if when else []
+            options.append(
+                {
+                    "key": name,
+                    "title": display["title"],
+                    "one_line": display["one_line"],
+                    "why": why,
+                    "tradeoff": display["tradeoff"],
+                    "recommended": name == picked,
+                    "risk": display["risk"],
+                    "score": scores.get(name),
+                    "disqualified": bool(
+                        isinstance(scores.get(name), (int, float)) and float(scores.get(name)) <= -100
+                    ),
+                    "text_source": display["text_source"],
+                }
+            )
+        return options, picked, [name for name in order if name != picked], route_payload
+
+    def kickoff_chat(self, payload: Any) -> dict:
+        """§10.2 的对外入口：规则状态机 + （预留的）reply 润色开关。"""
+        return self._kickoff_finish(self._kickoff_chat(payload))
+
+    def _kickoff_finish(self, response: dict) -> dict:
+        """CONTRACT §10.4 的**模型通道开关位**。
+
+        默认（未开 ``--import-llm``）绝不进入；即使开了，本版本也只把 ``reply`` 交给
+        :meth:`_kickoff_polish_reply`，而它现在**原样返回**——「宁可不变，也不许改
+        JSON 结构或路由结论」。将来接模型时只改这一个方法。
+        """
+        if self.import_llm:
+            response["reply"] = self._kickoff_polish_reply(dict(response["reply"]))
+        return response
+
+    def _kickoff_polish_reply(self, reply: dict) -> dict:
+        """§10.4 占位：可选地用模型润色 ``reply.text``（尚未实现，当前为恒等函数）。"""
+        return reply
+
+    def _kickoff_chat(self, payload: Any) -> dict:
+        """§10.2：五步收敛的对话状态机。**默认纯规则，不出网。**"""
+        if not isinstance(payload, Mapping):
+            raise WorkbenchError(E_BAD_REQUEST, "payload 必须是 JSON 对象")
+        known = {"messages", "state", "free_text"}
+        unknown = sorted(str(key) for key in payload if str(key) not in known)
+        if unknown:
+            raise WorkbenchError(
+                E_VALIDATION,
+                f"chat 的 payload 未知字段: {_display_list(unknown)}",
+                f"允许字段: {sorted(known)}",
+            )
+        messages = payload.get("messages") or []
+        if not isinstance(messages, list):
+            raise WorkbenchError(E_VALIDATION, "messages 必须是数组", '例如 [{"role":"user","content":"…"}]')
+        free_text = bool(payload.get("free_text"))
+        raw_state = payload.get("state")
+        if raw_state is None:
+            state = kickoff_empty_state()
+        elif isinstance(raw_state, Mapping):
+            if raw_state.get("step") not in KICKOFF_STEPS:
+                raise WorkbenchError(
+                    E_VALIDATION,
+                    f"state.step 非法: {_display(raw_state.get('step'))!r}",
+                    f"允许: {', '.join(KICKOFF_STEPS)}",
+                )
+            answers = raw_state.get("answers")
+            if answers is not None and not isinstance(answers, Mapping):
+                raise WorkbenchError(E_VALIDATION, "state.answers 必须是对象")
+            state = {
+                "step": raw_state.get("step"),
+                "answers": json.loads(json.dumps(_to_jsonable(answers), ensure_ascii=False))
+                if isinstance(answers, Mapping)
+                else kickoff_empty_state()["answers"],
+            }
+        else:
+            raise WorkbenchError(E_VALIDATION, "state 必须是对象（原样回传上一轮的 state）")
+        state["missing"] = _kickoff_missing(state["answers"])
+
+        step = state["step"]
+        if step in ("options", "done"):
+            # 已到选项步：再喂消息就是「重新选择」，保持选项不动，避免状态倒流。
+            options, picked, others, _ = self._kickoff_options(state["answers"])
+            return {
+                "ok": True,
+                "ready": True,
+                "reply": {
+                    "text": "已经可以选算法了：下面是 condopt 路由器按你刚才的答案给出的候选。",
+                    "quick_replies": [],
+                },
+                "state": state,
+                "options": options,
+                "candidates": {"recommended": picked, "others": others},
+            }
+
+        # 取最后一条 user 消息作为这一轮的回答
+        answer_text = ""
+        answer_value: Mapping | None = None
+        for message in reversed(messages):
+            if not isinstance(message, Mapping):
+                continue
+            if str(message.get("role") or "") != "user":
+                continue
+            content = message.get("content")
+            answer_text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            if isinstance(content, Mapping):
+                answer_value = content
+            else:
+                try:
+                    parsed = json.loads(answer_text)
+                    if isinstance(parsed, Mapping):
+                        answer_value = parsed
+                except (json.JSONDecodeError, TypeError):
+                    answer_value = None
+            break
+
+        if answer_value is None and answer_text:
+            answer_value = _match_chip(step, answer_text)
+        if answer_value is None and answer_text and free_text:
+            parser = {
+                "objective": _parse_objective_text,
+                "budget": _parse_budget_text,
+                "variables": _parse_variables_text,
+                "noise": _parse_noise_text,
+                "constraints": _parse_constraints_text,
+            }[step]
+            answer_value = parser(answer_text)
+
+        if answer_value is None:
+            # 解析不了就**再问一次**，不瞎猜（§10.2）。
+            if not answer_text:
+                reply = _kickoff_question_reply(step)
+            elif free_text:
+                reply = _kickoff_question_reply(
+                    step, "这句我没解析出需要的信息，所以不敢替你猜——请换个说法，或直接点下面的选项。"
+                )
+            else:
+                reply = _kickoff_question_reply(
+                    step, "没看懂这条回答，请直接点下面的选项（或带 free_text:true 让我按规则解析）。"
+                )
+            return {"ok": True, "ready": False, "reply": reply, "state": state, "options": None, "candidates": None}
+
+        checked = _kickoff_chip_for_value(step, answer_value) or dict(answer_value)
+        if step == "variables" and checked.get("defer_to_import"):
+            state["answers"]["defer_to_import"] = True
+            return {
+                "ok": True,
+                "ready": False,
+                "reply": {
+                    "text": (
+                        "好，那这条不走对话：去 **06 导入数据** 把历史表读进来，它会用同一套 run 语义"
+                        "直接建 study 并落到算法子参数页。导入完成后回到这里，也能在同一个 study 上继续。\n\n"
+                        "**为什么这样分**：条件空间要从你的数据里推断，靠猜区间会毁掉整场实验。"
+                    ),
+                    "quick_replies": _kickoff_quick_replies("variables")[:2],
+                },
+                "state": state,
+                "options": None,
+                "candidates": None,
+            }
+
+        answers = _kickoff_merge(state["answers"], checked)
+        state["answers"] = answers
+        state["missing"] = _kickoff_missing(answers)
+
+        if step == "constraints":
+            if state["missing"]:
+                # 信息不足：停住并说明缺什么，options 必须是 null（§10.5.3）。
+                gap = "、".join(_KICKOFF_MISSING_TEXT[item] for item in state["missing"])
+                target = state["missing"][0]
+                state["step"] = target
+                return {
+                    "ok": True,
+                    "ready": False,
+                    "reply": _kickoff_question_reply(
+                        target,
+                        f"还差 **{gap}** 才能给你算法选项，所以先停在「{target}」这一步继续问——"
+                        "不会用一个凑出来的选项糊过去。",
+                    ),
+                    "state": state,
+                    "options": None,
+                    "candidates": None,
+                }
+            options, picked, others, _ = self._kickoff_options(answers)
+            state["step"] = "options"
+            return {
+                "ok": True,
+                "ready": True,
+                "reply": {
+                    "text": (
+                        f"信息够了。condopt 的路由器在你这组答案上的**首选是 {picked}**；"
+                        "下面是它按真实打分给出的候选，点一张卡进去就能调该算法的子参数。"
+                    ),
+                    "quick_replies": [],
+                },
+                "state": state,
+                "options": options,
+                "candidates": {"recommended": picked, "others": others},
+            }
+
+        next_step = _KICKOFF_NEXT_STEP[step]
+        state["step"] = next_step
+        if next_step == "options":
+            options, picked, others, _ = self._kickoff_options(answers)
+            return {
+                "ok": True,
+                "ready": True,
+                "reply": {
+                    "text": (
+                        f"信息够了。condopt 的路由器在你这组答案上的**首选是 {picked}**；"
+                        "下面是候选算法，点进去调子参数。"
+                    ),
+                    "quick_replies": [],
+                },
+                "state": state,
+                "options": options,
+                "candidates": {"recommended": picked, "others": others},
+            }
+        return {
+            "ok": True,
+            "ready": False,
+            "reply": _kickoff_question_reply(next_step),
+            "state": state,
+            "options": None,
+            "candidates": None,
+        }
+
+    def kickoff_plan(self, payload: Any) -> dict:
+        """§10.3：参数页数据 —— params 取自 registry，why 取自 router，answers 可直喂 init。"""
+        if not isinstance(payload, Mapping):
+            raise WorkbenchError(E_BAD_REQUEST, "payload 必须是 JSON 对象")
+        known = {"state", "algorithm"}
+        unknown = sorted(str(key) for key in payload if str(key) not in known)
+        if unknown:
+            raise WorkbenchError(
+                E_VALIDATION,
+                f"plan 的 payload 未知字段: {_display_list(unknown)}",
+                f"允许字段: {sorted(known)}",
+            )
+        state = payload.get("state")
+        if not isinstance(state, Mapping):
+            raise WorkbenchError(E_VALIDATION, "plan 需要 state（chat 返回的那个）")
+        answers_in = state.get("answers")
+        if not isinstance(answers_in, Mapping):
+            raise WorkbenchError(E_VALIDATION, "state.answers 必须是对象")
+        missing = _kickoff_missing(answers_in)
+        if missing:
+            gap = "、".join(_KICKOFF_MISSING_TEXT[item] for item in missing)
+            raise WorkbenchError(
+                E_VALIDATION,
+                f"还不能生成参数页：缺 {gap}",
+                "先把 /api/kickoff/chat 走到 options，再调 plan",
+            )
+        answers, warnings = self._kickoff_answers_for_init(answers_in)
+        algorithm = payload.get("algorithm")
+        if algorithm is None:
+            algorithm = "auto"
+        if not isinstance(algorithm, str) or not algorithm.strip():
+            raise WorkbenchError(E_VALIDATION, "algorithm 必须是非空字符串", "例如 bayes / auto")
+        _, _, _, recommendation = self._kickoff_context_from_answers(answers)
+        route_payload = _to_jsonable(recommendation.to_dict())
+        picked = str(route_payload.get("algorithm") or "")
+        if algorithm == "auto":
+            algorithm = picked
+        elif algorithm not in condopt_registry.names():
+            raise WorkbenchError(
+                E_VALIDATION,
+                f"未知算法: {_display(algorithm)}",
+                f"可用: auto, {', '.join(condopt_registry.names())}",
+            )
+        if algorithm != picked:
+            warnings.append(
+                f"condopt 路由器在你的答案上首选 {picked}（评分 {route_payload.get('candidate_scores', {}).get(picked)}），"
+                f"你选了 {algorithm}；why 仍是 router 的选择依据，供对照。"
+            )
+        described = condopt_registry.describe(algorithm)
+        params = [_to_jsonable(_param_display(item)) for item in (described.get("params") or [])]
+        why = [str(item) for item in (route_payload.get("rationale") or [])]
+        if not why:
+            described_route = {item["name"]: item for item in condopt_registry.describe_all()}
+            why = [str(described_route.get(algorithm, {}).get("when") or "")]
+        warnings.extend(str(item) for item in (route_payload.get("warnings") or []))
+        return {
+            "ok": True,
+            "algorithm": algorithm,
+            "why": why,
+            "params": params,
+            "answers": _to_jsonable(answers),
+            "warnings": warnings,
+            "params_source": "registry.describe_all()（name/type/default/choices 全部代码取值）",
+            "display_source_note": (
+                "label/plain/impact/advanced 是工作台人工文案（display_source=workbench）；"
+                "未覆盖到的参数回落 registry 的 description（display_source=registry）。"
+            ),
+            "recommended_algorithm": picked,
+        }
 
     # -- SSE -----------------------------------------------------------------
     def stream_scenario(self, scenario_key: str, payload: Any = None) -> Iterable[tuple[str, dict]]:
@@ -2891,6 +3338,611 @@ def _notices(action: str, result: dict) -> list[str]:
     if action == "render":
         notices.extend(str(item) for item in (result.get("warnings") or []))
     return notices
+
+
+# --------------------------------------------------------------------------- #
+# 对话式开工（CONTRACT §10）：确定性规则，默认不出网
+#
+# 文案分成两类，响应里逐条标明来源，绝不把人工文案伪装成算法库元数据：
+#   * ``KICKOFF_*_CHIPS`` / ``ALGO_DISPLAY`` / ``PARAM_DISPLAY`` = **人工文案**（工作台维护的中文）；
+#   * ``registry.describe_all()`` / ``router.route()`` = **代码取值**（params、why、评分、summary/when 回落）。
+# --------------------------------------------------------------------------- #
+
+#: 五步 + options + done（§10.2 的 step 取值）。
+KICKOFF_STEPS = ("objective", "budget", "variables", "noise", "constraints", "options", "done")
+
+#: condopt 允许的枚举值（来自 schema，不是猜的；解析结果只允许落在这两个集合里）。
+KICKOFF_SMOOTHNESS = ("smooth", "mixed", "rough")
+KICKOFF_NOISE = ("low", "medium", "high")
+
+#: 变量声明：名称 + （方括号/圆括号取值列表 | 低-高区间）。一个 token 一个变量。
+#: 用「扫描式」而不是「先 split 再逐段匹配」——否则 ``溶剂[MeCN, EtOH]`` 会被逗号切开。
+_KICKOFF_VAR_TOKEN = re.compile(
+    r"(?P<name>[^0-9\[\]（）(),，、;；\s]+?)\s*"
+    r"(?:"
+    r"\[(?P<choices_b>[^\]]+)\]"
+    r"|（(?P<choices_c>[^）]+)）"
+    r"|\((?P<choices_d>[^)]+)\)"
+    r"|[:：]?\s*(?P<low>-?\d+(?:\.\d+)?)\s*[-~–—]\s*(?P<high>-?\d+(?:\.\d+)?)"
+    r"\s*(?P<unit>[A-Za-z°℃℉%/^]{0,8})"
+    r")"
+)
+#: 两个变量声明之间只允许出现这些分隔（否则视为「没读懂」→ 再问一次）。
+_KICKOFF_VAR_GAP = re.compile(r"^[\s,，、;；和与]*$")
+#: 约束：「纯度 >= 95」「纯度≥95」「纯度 不低于 95」。
+_KICKOFF_CONSTRAINT = re.compile(
+    r"(?P<name>[^\d<>≤≥=]+?)\s*(?P<op>>=|<=|≥|≤|>|<|==|=|不低于|不超过|至少|至多)\s*(?P<value>-?\d+(?:\.\d+)?)"
+)
+_KICKOFF_CONSTRAINT_NONE = ("没有", "无约束", "不需要", "暂无", "否", "none", "no")
+_KICKOFF_NEGATIVE = ("越小", "越低", "最小", "最低", "最少", "省", "降低", "min", "reduce", "decrease")
+_KICKOFF_POSITIVE = ("越大", "越高", "最大", "最高", "最多", "提升", "提高", "max", "increase")
+
+#: 人工文案：目标方向芯片。value 直接是 prepare 的 objective 片段。
+KICKOFF_OBJECTIVE_CHIPS = (
+    {"label": "收率越大越好", "value": {"objective": {"name": "yield", "direction": "max"}}},
+    {"label": "纯度越大越好", "value": {"objective": {"name": "purity", "direction": "max"}}},
+    {"label": "成本越小越好", "value": {"objective": {"name": "cost", "direction": "min"}}},
+)
+
+#: 人工文案：预算芯片（数字即 answers.budget；effort 只作展示层标签）。
+KICKOFF_BUDGET_CHIPS = (
+    {"label": "便宜 · 40 次", "value": {"budget": 40, "effort": "quick"}},
+    {"label": "一般 · 160 次", "value": {"budget": 160, "effort": "normal"}},
+    {"label": "很贵 · 24 次", "value": {"budget": 24, "effort": "thorough"}},
+)
+
+#: 人工文案：条件变量芯片。**低/高范围是工作台给的默认值**（回复里会说明可在参数页改），
+#: 不是从用户数据里读出来的，所以 chip 的 label 明确写「用一组常见默认区间」。
+KICKOFF_VARIABLE_CHIPS = (
+    {
+        "label": "温度 + 压力（用 20–150 / 1–10 的默认区间）",
+        "value": {
+            "variables": [
+                {"name": "温度", "kind": "continuous", "low": 20.0, "high": 150.0, "unit": "degC"},
+                {"name": "压力", "kind": "continuous", "low": 1.0, "high": 10.0, "unit": "bar"},
+            ]
+        },
+    },
+    {
+        "label": "只有温度（20–150 degC）",
+        "value": {
+            "variables": [
+                {"name": "温度", "kind": "continuous", "low": 20.0, "high": 150.0, "unit": "degC"}
+            ]
+        },
+    },
+    {"label": "我贴一份历史数据（走 06 导入）", "value": {"defer_to_import": True}},
+)
+
+#: 人工文案：噪声/光滑度芯片（middle 档的 smoothness 值必须是 condopt 的 "mixed"）。
+KICKOFF_NOISE_CHIPS = (
+    {"label": "噪声小 · 光滑", "value": {"noise": "low", "smoothness": "smooth"}},
+    {"label": "噪声中 · 一般", "value": {"noise": "medium", "smoothness": "mixed"}},
+    {"label": "噪声大 · 跳变", "value": {"noise": "high", "smoothness": "rough"}},
+)
+
+#: 人工文案：约束芯片。
+KICKOFF_CONSTRAINT_CHIPS = (
+    {"label": "没有硬约束", "value": {"constraints": 0, "constraint_items": []}},
+    {
+        "label": "纯度 ≥ 95",
+        "value": {
+            "constraints": 1,
+            "constraint_items": [{"metric": "purity", "op": ">=", "value": 95.0}],
+        },
+    },
+)
+
+#: 每一步的「问什么 + 为什么问」（人工文案）。
+KICKOFF_QUESTIONS: dict[str, dict] = {
+    "objective": {
+        "text": (
+            "先确认要优化的**结果**：你想让哪个指标变好？是越大越好还是越小越好？\n\n"
+            "**为什么问这个**：目标名和方向决定了后面所有采样的排序方式——方向填反了，"
+            "整场实验都会朝着错的方向走。"
+        ),
+    },
+    "budget": {
+        "text": (
+            "接下来是**预算**：一次实验大概多贵，总共准备做多少次？\n\n"
+            "**为什么问这个**：预算决定该用「样本效率高但假设多」的模型类算法，"
+            "还是「稳健但吃次数」的采样类算法；次数不够时模型类更划算。"
+        ),
+    },
+    "variables": {
+        "text": (
+            "**有哪些条件可以调？**可以说名字，也可以直接给范围，例如 `温度 20-150、溶剂[MeCN, EtOH]`。\n\n"
+            "**为什么问这个**：条件空间是优化的搜索范围。只报名字而不给范围我没法确定边界，"
+            "所以那样我会再问一次——不会替你猜。"
+        ),
+    },
+    "noise": {
+        "text": (
+            "测量**噪声**大吗？响应面**光滑**吗？\n\n"
+            "**为什么问这个**：噪声大就要抑制过拟合、多半还得做复孔；响应面有跳变时"
+            "高斯过程这类「假设光滑」的算法会退化，得换更稳健的。"
+        ),
+    },
+    "constraints": {
+        "text": (
+            "最后：有没有**必须满足的硬约束**（例如纯度 ≥ 95）？\n\n"
+            "**为什么问这个**：硬约束会改变「什么算好结果」——没有约束的算法可能一直给你"
+            "不可行的最优解。"
+        ),
+    },
+}
+
+#: 人工文案：算法卡片（title/one_line/tradeoff/risk）+ 来源标记。
+#: 未列出的算法回落到 `registry.describe_all()` 的 summary/when（`text_source="registry"`）。
+ALGO_DISPLAY: dict[str, dict] = {
+    "bayes": {
+        "title": "贝叶斯优化（bayes）",
+        "one_line": "样本效率最高，预算有限时最可能逼近最优。",
+        "tradeoff": "代理模型假设响应面光滑；有跳变或强噪声时会退化。",
+        "risk": "low",
+    },
+    "tpe": {
+        "title": "TPE（tpe）",
+        "one_line": "对分类/混合空间友好，小样本也能用。",
+        "tradeoff": "不如高斯过程擅长精细的连续极值。",
+        "risk": "low",
+    },
+    "constrained": {
+        "title": "约束贝叶斯（constrained）",
+        "one_line": "先找可行点，再在可行域里做带约束的改进。",
+        "tradeoff": "可行域极小时前几轮几乎都在找可行点，探索效率下降。",
+        "risk": "medium",
+    },
+    "sobol": {
+        "title": "Sobol 序列（sobol）",
+        "one_line": "空间填充均匀，适合做初始设计或中等维度。",
+        "tradeoff": "不利用已有观测，预算大时样本效率一般。",
+        "risk": "low",
+    },
+    "lhs": {
+        "title": "拉丁超立方（lhs）",
+        "one_line": "单批内每维分层均匀，适合一次性批量实验。",
+        "tradeoff": "同样是空间填充，不做模型引导。",
+        "risk": "low",
+    },
+    "random": {
+        "title": "随机搜索（random）",
+        "one_line": "无模型、极稳健，高维或极小预算的兜底。",
+        "tradeoff": "样本效率最低，别指望它精细收敛。",
+        "risk": "low",
+    },
+    "cmaes": {
+        "title": "CMA-ES（cmaes）",
+        "one_line": "连续、中等维度上的进化策略，抗噪。",
+        "tradeoff": "需要较多评估次数，且对分类变量不友好。",
+        "risk": "medium",
+    },
+    "grid": {
+        "title": "网格搜索（grid）",
+        "one_line": "穷举等距网格，最直观、最容易解释。",
+        "tradeoff": "维度一高就爆炸，只适合低维小空间。",
+        "risk": "high",
+    },
+    "parego": {
+        "title": "ParEGO（parego）",
+        "one_line": "多目标标量化，单次只跑一个标量目标。",
+        "tradeoff": "需要多目标问题才划算；权重标量化会丢一部分前沿覆盖。",
+        "risk": "medium",
+    },
+    "qehvi": {
+        "title": "qEHVI（qehvi）",
+        "one_line": "批量多目标期望超体积改进，专为 2 目标设计。",
+        "tradeoff": "目标数 > 2 时不可用；计算比标量化重。",
+        "risk": "medium",
+    },
+    "qehvi_nd": {
+        "title": "qEHVI-ND（qehvi_nd）",
+        "one_line": "多目标（>2）的批量超体积改进。",
+        "tradeoff": "计算最重，预算很少时前几轮都在建模型。",
+        "risk": "medium",
+    },
+    "qnehvi": {
+        "title": "qNEHVI（qnehvi）",
+        "one_line": "噪声下的批量多目标改进，抗噪更强。",
+        "tradeoff": "比 qEHVI 更慢，且需要噪声估计。",
+        "risk": "medium",
+    },
+    "cqehvi": {
+        "title": "约束 qEHVI（cqehvi）",
+        "one_line": "2 目标 + 硬约束的批量前沿搜索。",
+        "tradeoff": "只支持 2 目标；可行域太小时起步慢。",
+        "risk": "medium",
+    },
+    "cqnehvi": {
+        "title": "约束 qNEHVI（cqnehvi）",
+        "one_line": "噪声 + 约束下的多目标批量搜索。",
+        "tradeoff": "计算最重的一档，适合预算充足的多目标问题。",
+        "risk": "medium",
+    },
+    "mfbo": {
+        "title": "多保真贝叶斯（mfbo）",
+        "one_line": "低保真先筛、高保真确认，省真实实验。",
+        "tradeoff": "需要你提供保真度与成本；低保真偏差大时会带偏。",
+        "risk": "medium",
+    },
+    "mfparego": {
+        "title": "多保真 ParEGO（mfparego）",
+        "one_line": "多目标 + 多保真，先低保真筛前沿。",
+        "tradeoff": "需要保真度/成本定义，设置成本高于单保真。",
+        "risk": "medium",
+    },
+    "momfbo": {
+        "title": "多目标多保真（momfbo）",
+        "one_line": "多目标 + 多保真 + 噪声的综合档。",
+        "tradeoff": "参数最多、最依赖保真度定义，配置不对收益会反噬。",
+        "risk": "high",
+    },
+    "mqehvi_nd": {
+        "title": "多目标多保真 EHVI（mqehvi_nd）",
+        "one_line": "多目标超体积改进 + 多保真采样。",
+        "tradeoff": "计算重，且需要成对的保真度数据。",
+        "risk": "high",
+    },
+}
+
+#: 人工文案：参数展示层（label/plain/impact/advanced）。未列出的参数回落 registry 的
+#: description，并在响应里标 `display_source="registry"`。
+PARAM_DISPLAY: dict[str, dict] = {
+    "kernel": {"label": "核函数", "plain": "越光滑的响应面用 rbf，一般用 matern52，粗糙/不连续用 matern32。", "impact": "high", "advanced": False},
+    "length_scale": {"label": "特征长度尺度", "plain": "初始长度尺度；越大越平滑、越小越允许局部起伏。一般不用动。", "impact": "medium", "advanced": True},
+    "ard": {"label": "逐维长度尺度（ARD）", "plain": "让每个条件变量有自己的尺度。混合空间建议开启。", "impact": "medium", "advanced": False},
+    "alpha": {"label": "观测噪声方差", "plain": "噪声大就调大（0.01–0.1），复孔多可调小。", "impact": "high", "advanced": False},
+    "n_initial": {"label": "初始设计点数", "plain": "先用空间填充点起步。0 = 自动按维度取。", "impact": "medium", "advanced": False},
+    "n_candidates": {"label": "候选点数", "plain": "每轮评估多少个候选点；越大越准也越慢。", "impact": "low", "advanced": True},
+    "acquisition": {"label": "采集函数", "plain": "ei/logei 平衡探索与利用；ucb 更偏探索；pi 更偏利用；ts 用后验采样。", "impact": "high", "advanced": False},
+    "kappa": {"label": "UCB 探索系数", "plain": "只在 acquisition=ucb 时生效；越大越敢往未知区域走。", "impact": "medium", "advanced": True},
+    "xi": {"label": "改进阈值 ξ", "plain": "只在 ei/pi 时生效；调大更偏探索。", "impact": "low", "advanced": True},
+    "batch_strategy": {"label": "批量策略", "plain": "一次建议多点时怎么避免重复；local_penalty 是默认的分散策略。", "impact": "medium", "advanced": True},
+    "local_frac": {"label": "批量分散半径", "plain": "批量点的排斥强度，越大点铺得越开。", "impact": "low", "advanced": True},
+    "local_sigma": {"label": "批量分散宽度", "plain": "配合 local_frac 使用，一般默认即可。", "impact": "low", "advanced": True},
+    "mc_draws": {"label": "蒙特卡洛样本数", "plain": "约束/多目标采集的 MC 积分精度；越大越准越慢。", "impact": "low", "advanced": True},
+    "constraint_margin": {"label": "约束余量", "plain": "把约束边界往里收一点，给噪声留余量。", "impact": "medium", "advanced": True},
+    "feasibility_threshold": {"label": "可行概率阈值", "plain": "可行概率低于它就优先找可行点。", "impact": "medium", "advanced": True},
+    "rho": {"label": "ParEGO 标量化权重", "plain": "多目标随机加权的采样强度，一般默认即可。", "impact": "low", "advanced": True},
+    "weight_alpha": {"label": "权重分布参数", "plain": "控制随机权重向哪个方向偏；默认 1.0 即均匀。", "impact": "low", "advanced": True},
+    "sigma0": {"label": "初始步长 σ0", "plain": "CMA-ES 的初始搜索步长；空间大就调大。", "impact": "high", "advanced": False},
+    "population_size": {"label": "种群大小", "plain": "每代评估点数；批量实验时按批大小设。", "impact": "medium", "advanced": False},
+    "gamma": {"label": "TPE 分裂分位", "plain": "把已有观测分成「好/差」两组的分位点。", "impact": "medium", "advanced": True},
+    "exploration_frac": {"label": "TPE 探索比例", "plain": "多少比例的建议来自随机探索。", "impact": "medium", "advanced": True},
+    "dedupe": {"label": "避开重复点", "plain": "是否避开已经评价过的条件；断点续跑时建议开启。", "impact": "low", "advanced": False},
+    "scramble": {"label": "Sobol 随机化", "plain": "随机化 Sobol 可复现又有随机性质，一般保持开启。", "impact": "low", "advanced": False},
+    "n_base": {"label": "基础样本数", "plain": "qNEHVI 的基底采样数；越大越稳越慢。", "impact": "low", "advanced": True},
+    "n_y": {"label": "后验样本数", "plain": "噪声下的后验抽样数量。", "impact": "low", "advanced": True},
+    "noise_std": {"label": "噪声标准差", "plain": "已知噪声水平时填它，比让模型自己估更稳。", "impact": "medium", "advanced": True},
+    "fidelity_levels": {"label": "保真度档位", "plain": "多保真实验各档的保真度数值（1.0 = 真实实验）。", "impact": "high", "advanced": False},
+    "fidelity_costs": {"label": "各档成本", "plain": "每档保真度的相对成本，决定值不值得先跑低保真。", "impact": "high", "advanced": False},
+    "cost_exponent": {"label": "成本指数", "plain": "成本随保真度上升的陡峭程度。", "impact": "low", "advanced": True},
+    "min_full_fraction": {"label": "全保真最低占比", "plain": "保证交付时有足够的真实实验证据。", "impact": "medium", "advanced": True},
+    "optimization": {"label": "LHS 优化轮数", "plain": "是否对拉丁超立方做最大化最小距离的优化。", "impact": "low", "advanced": False},
+}
+
+#: 人工文案：哪一步答完之后该问哪一步（§10.1 的五轮顺序）。
+_KICKOFF_NEXT_STEP = {
+    "objective": "budget",
+    "budget": "variables",
+    "variables": "noise",
+    "noise": "constraints",
+    "constraints": "options",
+}
+
+#: 缺字段时的人话说明（人工文案）。
+_KICKOFF_MISSING_TEXT = {
+    "objective": "目标（要优化的指标名 + 越大越好/越小越好）",
+    "budget": "总实验次数（budget）",
+    "variables": "至少一个可调条件及其范围",
+}
+
+
+def kickoff_empty_state() -> dict:
+    """空状态：step=objective，answers 用 condopt 的枚举默认值（不是编造的实验结果）。"""
+    return {
+        "step": "objective",
+        "answers": {
+            "objective": {"name": "", "direction": "max"},
+            "variables": [],
+            "budget": 0,
+            "batch": KICKOFF_DEFAULT_BATCH,
+            "noise": "medium",
+            "smoothness": "mixed",
+            "domain": "generic",
+            "prior": 0,
+            "notes": "由对话式开工生成（CONTRACT §10）",
+        },
+        "missing": ["objective"],
+    }
+
+
+#: 对话没问 batch（§10.1 只问五件事），给一个明确默认值并写进 plan 的 warnings。
+KICKOFF_DEFAULT_BATCH = 4
+
+
+def _kickoff_missing(answers: Mapping) -> list[str]:
+    """哪些字段还不足以路由（顺序即提示顺序）。**不足就停住，不凑选项。**"""
+    missing: list[str] = []
+    objective = answers.get("objective") or {}
+    if not isinstance(objective, Mapping) or not str(objective.get("name") or "").strip():
+        missing.append("objective")
+    if objective.get("direction") not in ("max", "min"):
+        missing.append("objective")
+    variables = answers.get("variables") or []
+    if not isinstance(variables, list) or not variables:
+        missing.append("variables")
+    budget = answers.get("budget")
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+        missing.append("budget")
+    # 去重且保持顺序
+    seen: list[str] = []
+    for item in missing:
+        if item not in seen:
+            seen.append(item)
+    return seen
+
+
+def _kickoff_chip_for_value(step: str, value: Mapping) -> dict | None:
+    """把解析出来的答案并进 answers（chip 已给出完整字段）。返回合并后的 answers 或 None。"""
+    chips = {
+        "objective": KICKOFF_OBJECTIVE_CHIPS,
+        "budget": KICKOFF_BUDGET_CHIPS,
+        "variables": KICKOFF_VARIABLE_CHIPS,
+        "noise": KICKOFF_NOISE_CHIPS,
+        "constraints": KICKOFF_CONSTRAINT_CHIPS,
+    }.get(step, ())
+    allowed = {"objective", "budget", "effort", "variables", "noise", "smoothness", "constraints",
+               "constraint_items", "defer_to_import"}
+    unknown = sorted(str(key) for key in value if str(key) not in allowed)
+    if unknown:
+        raise WorkbenchError(
+            E_VALIDATION,
+            f"{step} 的答案未知字段: {_display_list(unknown)}",
+            f"允许字段: {sorted(allowed)}",
+        )
+    return None if not chips else dict(value)
+
+
+def _match_chip(step: str, text: str) -> dict | None:
+    """用**我们自己发出去的 chip 标签**做精确匹配（前端把 label 当文本回传也能work）。"""
+    if not text:
+        return None
+    normalized = re.sub(r"\s+", "", text)
+    chips = {
+        "objective": KICKOFF_OBJECTIVE_CHIPS,
+        "budget": KICKOFF_BUDGET_CHIPS,
+        "variables": KICKOFF_VARIABLE_CHIPS,
+        "noise": KICKOFF_NOISE_CHIPS,
+        "constraints": KICKOFF_CONSTRAINT_CHIPS,
+    }.get(step, ())
+    for chip in chips:
+        if re.sub(r"\s+", "", str(chip["label"])) == normalized:
+            return dict(chip["value"])
+    return None
+
+
+def _parse_objective_text(text: str) -> dict | None:
+    """规则解析目标；**方向不明就返回 None（再问一次），绝不猜方向**。
+
+    名称取「方向词之前的那截」——比「把方向词删掉」稳，因为中文里
+    ``收率越大越好`` 删 ``越大`` 会留下 ``越好``（切成 ``收率越``）。
+    """
+    cleaned = re.sub(r"\s+", "", str(text or ""))
+    if not cleaned:
+        return None
+    direction = None
+    cut = len(cleaned)
+    for keywords, value in ((_KICKOFF_NEGATIVE, "min"), (_KICKOFF_POSITIVE, "max")):
+        for keyword in keywords:
+            index = cleaned.find(keyword)
+            if index != -1 and index < cut:
+                cut, direction = index, value
+    if direction is None:
+        return None
+    name = cleaned[:cut].strip()
+    # 去掉「让/把/使/要/想」这类动词与标点（只剥两端，不动词中间的字）
+    name = name.strip("：:，,。.、的好了要想要把让使请帮我看下")
+    if not name:
+        return None
+    return {"objective": {"name": name, "direction": direction}}
+
+
+def _parse_budget_text(text: str) -> dict | None:
+    """规则解析预算：取第一个整数；没有数字就返回 None。"""
+    match = re.search(r"(?<!\d)(\d{1,7})(?!\d)", str(text or ""))
+    if match is None:
+        return None
+    value = int(match.group(1))
+    if value < 1:
+        return None
+    return {"budget": value}
+
+
+def _parse_variables_text(text: str) -> dict | None:
+    """规则解析条件变量。
+
+    **只认明确写出来的边界**：``温度 20-150``（连续）或 ``溶剂[MeCN, EtOH]``（分类），
+    多个用顿号/逗号/空格分隔。只报名字（没有范围/取值）→ 返回 None 再问一次，
+    绝不替用户猜 low/high（§10.2「解析不了就再问，不许瞎猜」）。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    variables: list[dict] = []
+    position = 0
+    for match in _KICKOFF_VAR_TOKEN.finditer(raw):
+        gap = raw[position : match.start()]
+        if not _KICKOFF_VAR_GAP.match(gap):
+            return None  # 中间夹着看不懂的内容 → 不猜
+        position = match.end()
+        name = match.group("name").strip()
+        choices_body = match.group("choices_b") or match.group("choices_c") or match.group("choices_d")
+        if choices_body is not None:
+            body = [item.strip() for item in re.split(r"[/|、,，;；\s]+", choices_body) if item.strip()]
+            if len(body) < 2:
+                return None
+            variables.append({"name": name, "kind": "categorical", "choices": body})
+            continue
+        low = float(match.group("low"))
+        high = float(match.group("high"))
+        if low >= high:
+            return None
+        entry: dict[str, Any] = {"name": name, "kind": "continuous", "low": low, "high": high}
+        unit = (match.group("unit") or "").strip()
+        if unit:
+            entry["unit"] = unit
+        variables.append(entry)
+    if not variables:
+        return None
+    if not _KICKOFF_VAR_GAP.match(raw[position:]):
+        return None
+    return {"variables": variables}
+
+
+def _parse_noise_text(text: str) -> dict | None:
+    cleaned = re.sub(r"\s+", "", str(text or ""))
+    if not cleaned:
+        return None
+    noise = None
+    for keyword in ("噪声大", "噪声高", "跳变", "粗糙", "不稳", "波动大"):
+        if keyword in cleaned:
+            noise = "high"
+            break
+    if noise is None:
+        for keyword in ("噪声小", "噪声低", "很稳", "平稳", "光滑", "平滑"):
+            if keyword in cleaned:
+                noise = "low"
+                break
+    if noise is None and ("中" in cleaned or "一般" in cleaned or "medium" in cleaned):
+        noise = "medium"
+    if noise is None:
+        return None
+    smoothness = {"low": "smooth", "high": "rough", "medium": "mixed"}[noise]
+    if noise not in KICKOFF_NOISE or smoothness not in KICKOFF_SMOOTHNESS:
+        return None  # 与 condopt 的枚举对齐（防手滑写出 schema 不认的值）
+    return {"noise": noise, "smoothness": smoothness}
+
+
+def _normalize_op(op: str) -> str:
+    return {"≥": ">=", "≤": "<=", "=": "==", "不低于": ">=", "至少": ">=",
+            "不超过": "<=", "至多": "<="}.get(op, op)
+
+
+def _parse_constraints_text(text: str) -> dict | None:
+    """规则解析硬约束；提到约束但读不出「指标 + 比较符 + 数值」→ None（再问一次）。"""
+    raw = str(text or "").strip()
+    cleaned = re.sub(r"\s+", "", raw)
+    if not cleaned:
+        return None
+    if any(keyword in cleaned.lower() for keyword in _KICKOFF_CONSTRAINT_NONE):
+        return {"constraints": 0, "constraint_items": []}
+    items: list[dict] = []
+    for match in _KICKOFF_CONSTRAINT.finditer(cleaned):
+        metric = match.group("name").strip("，,。.、的：:和与")
+        if not metric:
+            continue
+        items.append(
+            {
+                "metric": metric,
+                "op": _normalize_op(match.group("op")),
+                "value": float(match.group("value")),
+            }
+        )
+    if not items:
+        return None
+    return {"constraints": len(items), "constraint_items": items}
+
+
+def _kickoff_merge(answers: Mapping, parsed: Mapping) -> dict:
+    """把一步的解析结果并进 answers（只覆盖它管的那几个字段）。"""
+    merged = json.loads(json.dumps(_to_jsonable(answers), ensure_ascii=False))
+    for key, value in parsed.items():
+        if key == "constraint_items":
+            merged["constraint_items"] = value
+            continue
+        if key == "defer_to_import":
+            merged["defer_to_import"] = bool(value)
+            continue
+        if key == "effort":
+            merged["effort"] = value  # 展示层标签，init 会忽略未知键（不写进 answers 就安全）
+            merged.pop("effort", None)
+            continue
+        merged[key] = value
+    return merged
+
+
+def _kickoff_quick_replies(step: str) -> list[dict]:
+    chips = {
+        "objective": KICKOFF_OBJECTIVE_CHIPS,
+        "budget": KICKOFF_BUDGET_CHIPS,
+        "variables": KICKOFF_VARIABLE_CHIPS,
+        "noise": KICKOFF_NOISE_CHIPS,
+        "constraints": KICKOFF_CONSTRAINT_CHIPS,
+    }.get(step, ())
+    return [{"label": chip["label"], "value": _to_jsonable(chip["value"])} for chip in chips]
+
+
+def _kickoff_question_reply(step: str, extra: str = "") -> dict:
+    question = KICKOFF_QUESTIONS[step]
+    text = question["text"] if not extra else f"{extra}\n\n{question['text']}"
+    return {"text": text, "quick_replies": _kickoff_quick_replies(step)}
+
+
+def _algorithm_display(algorithm: str) -> dict:
+    """算法卡片的文案：人工表优先，缺则回落 registry（并把来源标出来）。"""
+    described = {item["name"]: item for item in condopt_registry.describe_all()}.get(algorithm, {})
+    hand = ALGO_DISPLAY.get(algorithm)
+    if hand:
+        return {
+            "title": hand["title"],
+            "one_line": hand["one_line"],
+            "tradeoff": hand["tradeoff"],
+            "risk": hand["risk"],
+            "text_source": "workbench",
+        }
+    summary = str(described.get("summary") or "").split("。")[0]
+    when = str(described.get("when") or "")
+    return {
+        "title": f"{algorithm}",
+        "one_line": summary or f"{algorithm}（registry 未提供摘要）",
+        "tradeoff": when or "registry 未提供适用场景说明",
+        "risk": "medium",
+        "text_source": "registry",
+    }
+
+
+def _param_display(param: Mapping) -> dict:
+    """参数展示层：人工表优先（``display_source="workbench"``），缺则回落 description。"""
+    name = str(param.get("name"))
+    hand = PARAM_DISPLAY.get(name)
+    entry = dict(param)
+    if hand:
+        entry.update(
+            {
+                "label": hand["label"],
+                "plain": hand["plain"],
+                "impact": hand["impact"],
+                "advanced": bool(hand["advanced"]),
+                "display_source": "workbench",
+            }
+        )
+    else:
+        entry.update(
+            {
+                "label": name,
+                "plain": str(param.get("description") or "（registry 未提供说明）"),
+                "impact": "medium",
+                "advanced": True,
+                "display_source": "registry",
+            }
+        )
+    return entry
+
+
+def _kickoff_options(state: Mapping, algorithm: str) -> dict:
+    """占位：真正的选项生成在 :meth:`Bridge._kickoff_options`（需要 parse_answers + route）。"""
+    raise NotImplementedError
 
 
 __all__ = [

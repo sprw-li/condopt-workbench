@@ -23,6 +23,8 @@
   <script defer src="./assets/condopt.js"></script>
   <!-- 06 导入数据：路径→扫描→映射→二次确认外发→应用→落调参表单（CONTRACT §9） -->
   <script defer src="./assets/import.js"></script>
+  <!-- 对话式开工（CONTRACT §10）：聊天窗 + 算法选项链接卡 + 参数页 -->
+  <script defer src="./assets/kickoff.js"></script>
 </head>
 <body>
 
@@ -103,41 +105,55 @@
       </header>
 
       <div class="panel-body">
-        <!-- condopt：结构化开工表单（字段由 GET /api/bootstrap 的 prepare_template 生成，不手写） -->
-        <div class="condopt-form" id="condoptForm" hidden>
-          <div class="condopt-form-head">
-            <span class="kicker">开工表单</span>
-            <span class="hint" id="condoptFormHint">字段由后端自动生成（模板加载中…）</span>
-          </div>
-          <div class="condopt-form-fields" id="condoptFormFields"></div>
-          <div class="condopt-form-foot">
-            <button class="btn btn-ghost btn-sm" id="condoptFormReset" type="button">
-              <i data-lucide="rotate-ccw"></i>按模板重置
-            </button>
-            <button class="btn btn-ghost btn-sm" id="condoptFormAddVar" type="button">
-              <i data-lucide="plus"></i>加一个变量
-            </button>
-            <span class="hint">表单与下面的 JSON 双向同步；表单没覆盖的字段（spec / constraints…）直接改 JSON。</span>
-          </div>
-        </div>
+        <!-- condopt §10：对话式开工——01 场景的首屏（kickoff.js 填充：聊天记录 + 快捷回复 + 算法选项卡） -->
+        <div class="condopt-kickoff" id="condoptKickoff" hidden></div>
 
         <!-- condopt §9：导入数据流程（路径→读取→列画像→映射确认→外发确认→应用），import.js 填充 -->
         <div class="condopt-import" id="condoptImport" hidden></div>
 
-        <div class="field">
-          <div class="field-head">
-            <label for="input" id="inputLabel">问卷答案 answers.json</label>
-            <span class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 运行</span>
-          </div>
-          <textarea class="textarea" id="input" spellcheck="false" aria-label="输入内容"></textarea>
-          <div class="field-foot">
-            <span class="count" id="charCount">0 字</span>
-            <div class="field-tools">
-              <button class="btn btn-ghost btn-sm" id="sampleBtn"><i data-lucide="sparkles"></i>载入示例</button>
-              <button class="btn btn-ghost btn-sm" id="clearBtn">清空</button>
+        <!-- condopt §10.4：旧的全量开工表 + answers JSON **降级**为默认收起的高级抽屉：
+             不删旧能力（45 字段仍可逐项改），但不再在首屏铺开。 -->
+        <details class="condopt-advanced" id="condoptAdvanced" hidden>
+          <summary>
+            <i data-lucide="settings-2"></i>
+            <span>高级：直接改 answers JSON</span>
+            <span class="hint">不懂就不用打开；聊天里答完会自动填好</span>
+          </summary>
+          <div class="condopt-advanced-body" id="condoptAdvancedBody" hidden>
+            <!-- 结构化开工表单（字段由 GET /api/bootstrap 的 prepare_template 生成，不手写） -->
+            <div class="condopt-form" id="condoptForm" hidden>
+              <div class="condopt-form-head">
+                <span class="kicker">开工表单</span>
+                <span class="hint" id="condoptFormHint">字段由后端自动生成（模板加载中…）</span>
+              </div>
+              <div class="condopt-form-fields" id="condoptFormFields"></div>
+              <div class="condopt-form-foot">
+                <button class="btn btn-ghost btn-sm" id="condoptFormReset" type="button">
+                  <i data-lucide="rotate-ccw"></i>按模板重置
+                </button>
+                <button class="btn btn-ghost btn-sm" id="condoptFormAddVar" type="button">
+                  <i data-lucide="plus"></i>加一个变量
+                </button>
+                <span class="hint">表单与下面的 JSON 双向同步；表单没覆盖的字段（spec / constraints…）直接改 JSON。</span>
+              </div>
+            </div>
+
+            <div class="field">
+              <div class="field-head">
+                <label for="input" id="inputLabel">问卷答案 answers.json</label>
+                <span class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 运行</span>
+              </div>
+              <textarea class="textarea" id="input" spellcheck="false" aria-label="输入内容"></textarea>
+              <div class="field-foot">
+                <span class="count" id="charCount">0 字</span>
+                <div class="field-tools">
+                  <button class="btn btn-ghost btn-sm" id="sampleBtn"><i data-lucide="sparkles"></i>载入示例</button>
+                  <button class="btn btn-ghost btn-sm" id="clearBtn">清空</button>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        </details>
 
         <div class="attach-row">
           <label class="attach-btn">
@@ -213,6 +229,9 @@
 
         <!-- condopt §9：导入数据的模型建议 / 导入结果 / 算法子参数表（import 场景专用） -->
         <section class="condopt-import-result" id="condoptImportResult" hidden></section>
+
+        <!-- condopt §10.3：对话式开工的算法参数页（kickoff.js 填充：助手解释 + 参数表 + 建 study） -->
+        <section class="condopt-kickoff-plan" id="condoptKickoffPlan" hidden></section>
       </div>
 
       <section class="review" id="review" hidden aria-label="人工拍板与留痕">

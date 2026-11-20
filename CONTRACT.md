@@ -129,7 +129,7 @@ RunSummary = {"id":"demo","n_obs":24,"n_rounds":6,"best":96.4,"direction":"max",
 | action | payload | condopt 调用 | `result` 关键字段 |
 |---|---|---|---|
 | `prepare` | `{"answers":{…}}`（`prepare.template()` 的形状） | `prepare.parse_answers` + `noise_advice` / `stopping_advice` / `feasibility_advice` / `deliverable_advice` / `prior_advice` + `registry` 路由 | `{"sections":[{"key":"stages|stopping|feasibility|deliverable|prior|noise","title":str,"markdown":str}],"problem":{…},"route":{…}}` |
-| `init` | `{"id":str,"answers":{…},"algorithm":"auto","budget":int?,"batch":int?}` | `prepare.write_problem` + `Study.create(...)` | `{"run":RunSummary}` |
+| `init` | `{"id":str,"answers":{…},"algorithm":"auto","params":{…}?,"budget":int?,"batch":int?}` | `prepare.write_problem` + `Study.create(...)` | `{"run":RunSummary}` |
 | `ask` | `{"n":int?,"plate":str?}` | `Study.ask` | `{"run":RunSummary,"pending":[Pending]}` |
 | `tell` | `{"observations":[{...}]}` 或 `{"csv":str}` | `Study.tell` | `{"run":RunSummary,"accepted":int}` |
 | `step` | `{}` | `Study.next_action` | `{"step":{…}}` |
@@ -424,3 +424,121 @@ data: {"run_id":"...","elapsed_ms":812,"mode":"live"}
 4. 端到端：scan → map(假网关) → apply → 用返回的 `params_schema` 调 `ask` 出下一批，全 `ok:true`。
 5. 默认配置下（不开 `--import-llm`）**全仓离线断言仍然成立**：`web` 无新增外链、页面加载零外网请求。
 6. 回归：`README.md` 的「不发外网请求」表述必须改成「默认不发；导入时按 §9.1 显式开启」——**文档不能与实现矛盾**。
+
+## 10. 对话式开工（第 1 环节重做，2026-11-21 00:20 冻结）
+
+> 需求方原话：「直接开一个 agent 聊天窗讲清楚具体情况……应该 agent 回话并自动把可选的条件优化算法以数个链接的方式呈现，最后再点进去要调参数的界面在他的解释下调参数。」
+> 现状问题：第 1 环节是一张**45 个字段的表单**（`prepare_template` 全量投影），
+> 用户要先看懂 `kind: continuous|log|categorical`、`noise: medium`、`budget: 24` 才能开工——
+> 门槛放在最前面，而这恰恰是 condopt 能替用户判断的部分。
+
+### 10.1 交互形态（替换「开工建议」的表单，不删旧能力）
+
+**01 场景改成对话**：左栏是聊天记录（用户/助手气泡），底部是输入框 + 快捷回复芯片。
+助手每轮只问**一个**问题，并用**人话**给出「为什么问这个 / 不回答会怎样」。
+
+流程（5 轮内必须收敛到选项）：
+
+| 轮次 | 助手问 | 快捷回复示例 | 落到哪个字段 |
+|---|---|---|---|
+| 1 | 你要优化什么结果？越大越好还是越小越好？ | 收率越大越好 / 纯度越大越好 / 成本越小越好 | `objective.name` / `direction` |
+| 2 | 一次实验大概多贵？总共准备做多少次？ | 便宜·40 次 / 一般·160 次 / 很贵·24 次 | `budget` / `effort` |
+| 3 | 有哪些条件可以调？（可多选） | 温度 压力 溶剂（分类）/ 我贴一份 →（走 06 导入） | `variables` |
+| 4 | 测量噪声大吗？响应面光滑吗？ | 噪声小·光滑 / 噪声中 / 噪声大·跳变 | `noise` / `smoothness` |
+| 5 | 有没有硬约束（必须满足的指标）？ | 没有 / 纯度 ≥ 95 | `constraints` |
+
+**第 5 轮结束后，助手回话 = 算法选项**（这是需求方要的「自动把可选算法以数个链接呈现」）：
+一次给出 **2–4 个**可点选项，每个都是一张卡（前端用 `<button>` 渲染，不用裸 URL）：
+
+```json
+{
+  "key": "bayes",
+  "title": "贝叶斯优化（bayes）",
+  "one_line": "样本效率最高，24 次预算里最可能逼近最优",
+  "why": ["维度 ≤ 12", "目标光滑", "预算少、每次实验贵"],
+  "tradeoff": "代理模型假设光滑；若响应面有跳变会退化",
+  "recommended": true,
+  "risk": "low"
+}
+```
+
+点进去 → 右栏变成**该算法的参数页**（见 §10.3），并在参数页顶部保留**助手的解释**
+（为什么推荐它、每个参数是什么、动了会怎样），而不是让用户面对一堆 `ParamSpec` 字段。
+
+### 10.2 `POST /api/kickoff/chat`
+
+请求：`{"messages":[{"role":"user|assistant","content":"..."}],"state":{…}}`
+- **首轮必须省略 `state`（或传 `null`）**：`state:{}` 是非法的（会 422 `state.step 非法: 'None'`）。
+  之后每一轮把上一轮响应里的 `state` **原样回传**——前端不解析、不拼装。
+  （这条 2026-11-21 01:00 明确：契约早期示例写的是 `state:{…}`，容易让人第一轮踩坑。）
+- `state` 是服务端上一轮返回的 `state` 原样回传（前端不解析、不拼装）——**状态在服务端，前端只负责显示**。
+- 可选 `{"free_text":true}`：允许用户不用芯片、直接打字（由规则解析数字/枚举；解析不了就再问一次，**不许瞎猜**）。
+
+响应：
+```json
+{
+  "ok": true,
+  "reply": {"text": "…markdown，1–3 句，含「为什么问这个」…", "quick_replies": [{"label":"…","value":{…}}]},
+  "state": {"step":"objective|budget|variables|noise|constraints|options|done","answers":{…}},
+  "ready": false,
+  "options": null,
+  "candidates": null
+}
+```
+- `step` 到 `options` 时：`options` 是 §10.1 的选项数组（2–4 个），`candidates` 可为 null。
+- 用户答完之后若信息不足以路由（例如没有任何可调变量）→ `reply.text` 必须**明说缺什么**，
+  `step` 停在原处，**不许**给一个「凑出来的」选项。
+
+### 10.3 `POST /api/kickoff/plan`
+
+请求：`{"state":{…},"algorithm":"bayes"}`（或 `"auto"`）
+
+响应：
+```json
+{
+  "ok": true,
+  "algorithm": "bayes",
+  "why": ["…来自 router 的规则命中，原样透出…"],
+  "params": [
+    {"name":"kernel","type":"choice","default":"matern52","choices":["matern52","matern32","rbf"],
+     "label":"核函数","plain":"越光滑的数据用 rbf，一般用 matern52",
+     "impact":"high|medium|low","advanced":false}
+  ],
+  "answers": { "…可回传给 init 的 prepare_template 形状…" },
+  "warnings": []
+}
+```
+- `params` 必须来自 `registry.describe_all()` 的 `params`（**代码取值**）；
+  `label` / `plain` / `impact` 是**展示层增补**（人工维护的中文说明，缺则回落 `description`），
+  必须在响应里显式标明来源，不许把它伪装成算法库自带的元数据。
+- `advanced:true` 的参数默认折叠，避免又把用户淹掉。
+
+### 10.4 与既有接口的关系
+
+- **`init` 扩展为接受 `params`（2026-11-21 01:00 裁定）**：参数页点「建 study」→
+  `POST /api/action {init, payload:{id, answers, algorithm, params}}`。
+  - `params` 形状是**平表** `{参数名: 值}`（与 condopt CLI `init --params` 的 JSON 一致，
+    也与 `Study.create(params=…)` 一致）；不要嵌套 `{"params":{…}}`，也不要带 `algorithm` 前缀。
+  - 服务端必须用 `registry.validate_params(algorithm, params)` 校验：未知键或值非法 → `422 E_VALIDATION`
+    并**点名字段**；不允许静默忽略（否则用户以为改了、其实没生效）。
+  - `algorithm == "auto"` 时**不接受非空 `params`**（还没路由出算法，参数无处安放）→ `422`，
+    message 明确「auto 路由下不能指定算法参数，请先选定算法或改用 override」。
+  - 落地后 `config.json` 里的 `params` 必须等于用户确认过的值（前端/验收都要能验证这一条）。
+  - 兼容：不传 `params` 时行为与旧版完全一致（既有测试不许红）。
+  对话与参数页只是把 `answers` 攒出来的**另一种入口**，最终仍走同一条写路径（唯一写者不变）。
+- **不删旧表单**：03「结果回填」/ 06「导入数据」等仍用自己的表单；旧的「开工表」全量投影
+  降级为参数页里的「高级：直接改 answers JSON」抽屉。
+- **模型通道**：这是「顾问」而不是「读表」，**默认用确定性规则**（router + 人工文案），不需要密钥；
+  若开了 `--import-llm`，可选让模型润色 `reply.text`（**只润色措辞，不改 JSON 结构、不改路由结论**），
+  失败必须回落到规则文案。
+
+### 10.5 验收
+
+1. 五轮内收敛：空 state 连续喂 5 条芯片答案 → `step=="options"` 且 `2 <= len(options) <= 4`。
+2. 每轮 `reply.text` 非空、含「为什么问这个」一类解释，`quick_replies` 至少 2 个（最后一轮除外）。
+3. 信息不足（例如变量为空）→ 停在原步并说明缺什么，`options` 必须为 null。
+4. `plan` 的 `params` 与 `registry.describe_all()[算法].params` 逐字段一致（name/type/default/choices）。
+5. 前端：01 场景首屏是聊天（不是表单）；选项是可点按钮；点进后右栏出现参数页（含解释 + 默认折叠 advanced）；
+   点「建 study」复用 `init` 且页面能看出它和「导入数据」「结果回填」是同一套 run 语义。
+6. 离线可用：不开 `--import-llm` 时整条对话与参数页功能完整（无外网请求）。
+7. 回归：`POST /api/action {prepare}` 旧行为不变（旧测试不红）。
