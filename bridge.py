@@ -1987,7 +1987,7 @@ class Bridge:
                 f"你选了 {algorithm}；why 仍是 router 的选择依据，供对照。"
             )
         described = condopt_registry.describe(algorithm)
-        params = [_to_jsonable(_param_display(item)) for item in (described.get("params") or [])]
+        params = [_to_jsonable(_param_display(algorithm, item)) for item in (described.get("params") or [])]
         why = [str(item) for item in (route_payload.get("rationale") or [])]
         if not why:
             described_route = {item["name"]: item for item in condopt_registry.describe_all()}
@@ -3585,27 +3585,47 @@ ALGO_DISPLAY: dict[str, dict] = {
     },
 }
 
-#: 人工文案：参数展示层（label/plain/impact/advanced）。未列出的参数回落 registry 的
-#: description，并在响应里标 `display_source="registry"`。
-PARAM_DISPLAY: dict[str, dict] = {
+#: 人工文案：参数展示层（label/plain/impact/advanced）。
+#:
+#: **索引规则**：先查 ``(algorithm, name)`` 精确条目，再回落 ``name`` 通用条目
+#: （见 :func:`_param_copy`）。只有在**跨算法签名不同**时才需要精确条目——例如
+#: ``acquisition`` 在 10 个算法里有 3 种 choices（``mfbo`` 只有 ei/logei/ucb），
+#: 通用文案里列举 pi/ts 就会对部分算法说错（task-17 / 验收 F9）。
+#: 未列出的参数回落 registry ``description``，并标 ``display_source="registry"``。
+PARAM_DISPLAY: dict[tuple[str, str] | str, dict] = {
+    # —— acquisition：choices 随算法不同，逐算法给文案 ——
+    **{
+        (algorithm, "acquisition"): {
+            "label": "采集函数",
+            "plain": "ei/logei 平衡探索与利用；ucb 更偏探索；pi 更偏利用；ts 用后验采样。",
+            "impact": "high",
+            "advanced": False,
+        }
+        for algorithm in ("bayes", "constrained", "cqehvi", "cqnehvi", "qehvi", "qnehvi")
+    },
+    "acquisition": {
+        "label": "采集函数",
+        "plain": "ei/logei 平衡探索与利用；ucb 更偏探索。其余取值以控件列出的为准。",
+        "impact": "high",
+        "advanced": False,
+    },
     "kernel": {"label": "核函数", "plain": "越光滑的响应面用 rbf，一般用 matern52，粗糙/不连续用 matern32。", "impact": "high", "advanced": False},
     "length_scale": {"label": "特征长度尺度", "plain": "初始长度尺度；越大越平滑、越小越允许局部起伏。一般不用动。", "impact": "medium", "advanced": True},
     "ard": {"label": "逐维长度尺度（ARD）", "plain": "让每个条件变量有自己的尺度。混合空间建议开启。", "impact": "medium", "advanced": False},
-    "alpha": {"label": "观测噪声方差", "plain": "噪声大就调大（0.01–0.1），复孔多可调小。", "impact": "high", "advanced": False},
-    "n_initial": {"label": "初始设计点数", "plain": "先用空间填充点起步。0 = 自动按维度取。", "impact": "medium", "advanced": False},
+    "alpha": {"label": "观测噪声方差", "plain": "测量越不稳就越该调大，复孔越多可调小（工作台建议区间 0.01–0.1）；各算法的默认不同，以控件显示的默认值为准。", "impact": "high", "advanced": False},
+    "n_initial": {"label": "初始设计点数", "plain": "先用多少个空间填充点起步；不填（0）则由后端按维度自动决定。", "impact": "medium", "advanced": False},
     "n_candidates": {"label": "候选点数", "plain": "每轮评估多少个候选点；越大越准也越慢。", "impact": "low", "advanced": True},
-    "acquisition": {"label": "采集函数", "plain": "ei/logei 平衡探索与利用；ucb 更偏探索；pi 更偏利用；ts 用后验采样。", "impact": "high", "advanced": False},
     "kappa": {"label": "UCB 探索系数", "plain": "只在 acquisition=ucb 时生效；越大越敢往未知区域走。", "impact": "medium", "advanced": True},
     "xi": {"label": "改进阈值 ξ", "plain": "只在 ei/pi 时生效；调大更偏探索。", "impact": "low", "advanced": True},
-    "batch_strategy": {"label": "批量策略", "plain": "一次建议多点时怎么避免重复；local_penalty 是默认的分散策略。", "impact": "medium", "advanced": True},
+    "batch_strategy": {"label": "批量策略", "plain": "一次建议多点时怎么避免点到重复位置；可选值与默认值随算法不同，以控件列出的为准。", "impact": "medium", "advanced": True},
     "local_frac": {"label": "批量分散半径", "plain": "批量点的排斥强度，越大点铺得越开。", "impact": "low", "advanced": True},
-    "local_sigma": {"label": "批量分散宽度", "plain": "配合 local_frac 使用，一般默认即可。", "impact": "low", "advanced": True},
+    "local_sigma": {"label": "批量分散宽度", "plain": "配合批量分散半径使用，一般默认即可。", "impact": "low", "advanced": True},
     "mc_draws": {"label": "蒙特卡洛样本数", "plain": "约束/多目标采集的 MC 积分精度；越大越准越慢。", "impact": "low", "advanced": True},
     "constraint_margin": {"label": "约束余量", "plain": "把约束边界往里收一点，给噪声留余量。", "impact": "medium", "advanced": True},
     "feasibility_threshold": {"label": "可行概率阈值", "plain": "可行概率低于它就优先找可行点。", "impact": "medium", "advanced": True},
     "rho": {"label": "ParEGO 标量化权重", "plain": "多目标随机加权的采样强度，一般默认即可。", "impact": "low", "advanced": True},
-    "weight_alpha": {"label": "权重分布参数", "plain": "控制随机权重向哪个方向偏；默认 1.0 即均匀。", "impact": "low", "advanced": True},
-    "sigma0": {"label": "初始步长 σ0", "plain": "CMA-ES 的初始搜索步长；空间大就调大。", "impact": "high", "advanced": False},
+    "weight_alpha": {"label": "权重分布参数", "plain": "控制随机权重的分布：数值越大权重越集中，默认即均匀分布。", "impact": "low", "advanced": True},
+    "sigma0": {"label": "初始步长 σ0", "plain": "初始搜索步长：条件空间越大就该越大，否则容易只在起点附近打转。", "impact": "high", "advanced": False},
     "population_size": {"label": "种群大小", "plain": "每代评估点数；批量实验时按批大小设。", "impact": "medium", "advanced": False},
     "gamma": {"label": "TPE 分裂分位", "plain": "把已有观测分成「好/差」两组的分位点。", "impact": "medium", "advanced": True},
     "exploration_frac": {"label": "TPE 探索比例", "plain": "多少比例的建议来自随机探索。", "impact": "medium", "advanced": True},
@@ -3614,7 +3634,7 @@ PARAM_DISPLAY: dict[str, dict] = {
     "n_base": {"label": "基础样本数", "plain": "qNEHVI 的基底采样数；越大越稳越慢。", "impact": "low", "advanced": True},
     "n_y": {"label": "后验样本数", "plain": "噪声下的后验抽样数量。", "impact": "low", "advanced": True},
     "noise_std": {"label": "噪声标准差", "plain": "已知噪声水平时填它，比让模型自己估更稳。", "impact": "medium", "advanced": True},
-    "fidelity_levels": {"label": "保真度档位", "plain": "多保真实验各档的保真度数值（1.0 = 真实实验）。", "impact": "high", "advanced": False},
+    "fidelity_levels": {"label": "保真度档位", "plain": "多保真实验各档的保真度数值；最高的一档对应真实实验，其余按相对保真度填。", "impact": "high", "advanced": False},
     "fidelity_costs": {"label": "各档成本", "plain": "每档保真度的相对成本，决定值不值得先跑低保真。", "impact": "high", "advanced": False},
     "cost_exponent": {"label": "成本指数", "plain": "成本随保真度上升的陡峭程度。", "impact": "low", "advanced": True},
     "min_full_fraction": {"label": "全保真最低占比", "plain": "保证交付时有足够的真实实验证据。", "impact": "medium", "advanced": True},
@@ -3912,10 +3932,23 @@ def _algorithm_display(algorithm: str) -> dict:
     }
 
 
-def _param_display(param: Mapping) -> dict:
-    """参数展示层：人工表优先（``display_source="workbench"``），缺则回落 description。"""
+def _param_copy(algorithm: str, name: str) -> dict | None:
+    """取参数的人工文案：**先精确 ``(algorithm, name)``、再通用 ``name``**。
+
+    精确条目是给「跨算法签名不同」的参数（如 ``acquisition`` 的 choices 有 3 种）用的，
+    避免通用文案列举了某个算法不存在的选项（task-17 / F9）。
+    ``test_param_copy_never_lies`` 会把这条索引规则当成契约来验。
+    """
+    exact = PARAM_DISPLAY.get((algorithm, name))
+    if exact is not None:
+        return exact
+    return PARAM_DISPLAY.get(name)
+
+
+def _param_display(algorithm: str, param: Mapping) -> dict:
+    """参数展示层：人工文案优先（``display_source="workbench"``），缺则回落 description。"""
     name = str(param.get("name"))
-    hand = PARAM_DISPLAY.get(name)
+    hand = _param_copy(algorithm, name)
     entry = dict(param)
     if hand:
         entry.update(

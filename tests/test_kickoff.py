@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import urllib.error
@@ -306,8 +307,10 @@ def test_plan_display_layer_is_marked_and_falls_back_to_registry(live_server: st
         assert item["impact"] in ("high", "medium", "low")
         assert isinstance(item["advanced"], bool)
         if item["display_source"] == "workbench":
-            assert item["label"] == bridge_module.PARAM_DISPLAY[item["name"]]["label"]
-            assert item["plain"] == bridge_module.PARAM_DISPLAY[item["name"]]["plain"]
+            copy = bridge_module._param_copy("bayes", item["name"])
+            assert copy is not None, f"{item['name']} 标了 workbench 却查不到文案"
+            assert item["label"] == copy["label"]
+            assert item["plain"] == copy["plain"]
         else:
             assert item["plain"] == item["description"]
     # 至少要能看出两种来源都真的出现过
@@ -594,3 +597,121 @@ def test_init_auto_without_params_still_routes(live_server: str, runs_dir: Path)
     recommendation = bridge_module.condopt_route(context)
     assert config["algorithm"] == recommendation.algorithm, "auto 必须落成 router 选中的算法"
     assert config["params"] == recommendation.params, "auto 的参数必须来自 router（不许被清空）"
+
+
+# --------------------------------------------------------------------------- #
+# 10. 文案不许静默说错（task-17 / 验收 F9）
+# --------------------------------------------------------------------------- #
+
+
+def _param_specs() -> dict[str, dict[str, dict]]:
+    """``{参数名: {算法: ParamSpec}}``（来自 registry，不手写）。"""
+    specs: dict[str, dict[str, dict]] = {}
+    for algorithm in condopt_registry.names():
+        for param in condopt_registry.describe(algorithm)["params"]:
+            specs.setdefault(param["name"], {})[algorithm] = param
+    return specs
+
+
+def _mentions(text: str, token: str) -> bool:
+    """token 作为**独立词**出现在文案里（``logei`` 不算提到 ``ei``）。"""
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", text) is not None
+
+
+def test_param_copy_index_resolution():
+    """索引规则：先精确 ``(algorithm, name)``，再通用 ``name``。"""
+    assert bridge_module._param_copy("bayes", "acquisition") is bridge_module.PARAM_DISPLAY[("bayes", "acquisition")]
+    assert bridge_module._param_copy("mfbo", "acquisition") is bridge_module.PARAM_DISPLAY["acquisition"]
+    assert bridge_module._param_copy("bayes", "kernel") is bridge_module.PARAM_DISPLAY["kernel"]
+    assert bridge_module._param_copy("bayes", "no-such-param") is None
+    # 通用 acquisition 文案不许列举 pi/ts（mfbo 等只有 ei/logei/ucb）
+    generic = bridge_module.PARAM_DISPLAY["acquisition"]["plain"]
+    assert not _mentions(generic, "pi") and not _mentions(generic, "ts")
+
+
+def _same_value(claimed: str, actual: object) -> bool:
+    """把文案里的字面量断言与 registry 的实际值比较（容忍写法差异）。
+
+    ``1e-6`` vs ``1e-06``、``0.30`` vs ``0.3``、``true`` vs ``True`` 都算相等——
+    这些是同一个值的不同写法，不是谎言；报的是**真的不一样**。
+    """
+    if str(claimed).lower() == str(actual).lower():
+        return True
+    try:
+        return float(claimed) == float(actual)
+    except (TypeError, ValueError):
+        return False
+
+
+def _param_copy_lies(display: dict | None = None) -> list[str]:
+    """检查人工文案里「对算法库的可证伪断言」，返回问题清单（空 = 没有说错）。
+
+    抽成函数是为了让**负对照**能直接调用它（篡改一份副本 → 必须报出问题），
+    而不是只能靠改源码再跑 pytest。
+    """
+    specs = _param_specs()
+    problems: list[str] = []
+    for key, entry in (bridge_module.PARAM_DISPLAY if display is None else display).items():
+        if isinstance(key, tuple):
+            algorithm, name = key
+            applicable = [algorithm] if algorithm in specs.get(name, {}) else []
+        else:
+            name = key
+            applicable = sorted(specs.get(name, {}))
+        if name not in specs:
+            problems.append(f"陈旧条目：PARAM_DISPLAY[{key!r}] 不是任何算法的参数")
+            continue
+        if not applicable:
+            problems.append(f"空适用集：PARAM_DISPLAY[{key!r}] 在任何算法里都取不到")
+            continue
+        text = f"{entry['label']} {entry['plain']}"
+        # 该参数名下所有出现过的 choice 字面量，逐个检查是否对每条适用算法都合法
+        ever = {value for spec in specs[name].values() for value in (spec.get("choices") or [])}
+        for value in sorted(ever):
+            if not _mentions(text, value):
+                continue
+            for algorithm in applicable:
+                legal = set(specs[name][algorithm].get("choices") or [])
+                if value not in legal:
+                    problems.append(
+                        f"PARAM_DISPLAY[{key!r}].plain 提到 {value!r}，但 {algorithm} 的 {name} "
+                        f"choices 是 {sorted(legal)}（文案: {text!r}）"
+                    )
+        # 「默认 X」断言：X 是字面量时**必须**等于该算法的 default（不再要求 X 先落在已知值里）
+        for claimed in re.findall(r"默认[值是为：:]*\s*([A-Za-z0-9_.+-]+)", text):
+            for algorithm in applicable:
+                actual = specs[name][algorithm].get("default")
+                if actual is None:
+                    problems.append(
+                        f"PARAM_DISPLAY[{key!r}] 说「默认 {claimed}」，但 {algorithm} 的 {name} "
+                        f"在 registry 里没有 default（不该声称默认值）"
+                    )
+                elif not _same_value(claimed, actual):
+                    problems.append(
+                        f"PARAM_DISPLAY[{key!r}] 说「默认 {claimed}」，但 {algorithm} 的 {name} "
+                        f"default 是 {actual!r}"
+                    )
+    return problems
+
+
+def test_param_copy_never_lies():
+    """人工文案对算法库的可证伪断言必须成立（选择项 / 默认值）。
+
+    * 文案里出现**任何 registry choice 字面量**时，该值必须是「这条文案适用的每个算法」
+      的合法 choice；否则红并指出 算法/参数/取值。
+    * 出现「默认 X」（X 是字面量）时，X 必须等于该算法的 registry default；
+      **任意而错误的数字也会被抓**（例如写「默认 4096」而 registry 是 1024）。
+    * **不禁止数字**：「工作台建议区间 0.01–0.1」这类是建议、不是对库的断言，允许保留。
+    """
+    problems = _param_copy_lies()
+    assert not problems, "人工文案与 registry 不一致：\n" + "\n".join(problems)
+
+
+def test_every_algorithm_has_a_hand_written_card():
+    """18 个算法都有卡片文案（不让某个算法悄悄回落到 registry 摘要）。"""
+    missing = [name for name in condopt_registry.names() if name not in bridge_module.ALGO_DISPLAY]
+    assert not missing, f"这些算法缺人工卡片文案: {missing}"
+    for name, entry in bridge_module.ALGO_DISPLAY.items():
+        assert name in condopt_registry.names(), f"ALGO_DISPLAY 有陈旧算法 {name!r}"
+        assert entry["risk"] in ("low", "medium", "high")
+        assert entry["title"] and entry["one_line"] and entry["tradeoff"]

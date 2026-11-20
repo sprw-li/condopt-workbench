@@ -402,12 +402,64 @@ scan.warnings        = […, "模型网关地址配置不合法：模型网关�
 - **降级**：`/api/kickoff/*` 404/405/网络失败 → 明确写出原因（例如「后端还没有 /api/kickoff/chat
   （HTTP_501）」）+ 内置离线演示（示例对话 / 示例选项 / 示例参数，并**标明不是 registry**），不白屏。
 
-### 8.3 真端点实测（`py -3 server.py`，30+6 项断言）
+### 8.3 同类加固必须对称（F10，task-18）
+
+`.condopt-advanced`（旧表单抽屉）早就有 `.condopt-advanced:not([open]) > .condopt-advanced-body { display: none; }`
+（外加 JS 同步 `hidden`）；但**新加的** `.condopt-advanced-params`（参数页的高级参数）一开始只依赖
+Chromium 对闭合 `<details>` 子树的 paint-skip —— 收起时它的 body 仍报 **678px** 矩形，
+与「建 study」块矩形重叠（verifier 量到 41,566 px²）。**今天没有用户可见影响**，
+但同一份代码里两个同类组件加固程度不一致，是下一次改动会踩的隐患。已补同款规则：
+
+```css
+.condopt-advanced-params:not([open]) > .condopt-advanced-params-body { display: none; }
+```
+
+⚠ 这里**不能**沿用旧抽屉的「JS 设 `hidden` 属性」做法：后端下发的 7 个高级参数必须仍被
+`readParams()` 读到值 —— `display:none` 不影响 `querySelectorAll` 取 `.value`/`.checked`，
+只是不参与布局（已实测：收起态把 `n_candidates` 改成 777 → 该值仍进入 init 的 `params`
+并落到 `config.json`）。
+
+### 8.4 「幻影重叠」与「真实重叠」怎么区分
+
+三条件**同时**成立才算真实重叠（与 verifier 的三重判定、以及 lead 修好的 `geom_probe.py` 同构）：
+
+1. **矩形相交**（用**可滚动祖先裁切后**的有效矩形；未裁切的原始矩形会把滚出视区的东西算成重叠）；
+2. **命中测试**：相交区域中心 `elementsFromPoint()` 的堆叠栈里**真的出现**该元素
+   （先把该区域滚进视野，否则 `elementFromPoint` 一律 null，「没命中」就成了废话）；
+3. **布局增量**：把覆盖方临时 `display:none`，被覆盖方的 y 与 `documentElement.scrollHeight`
+   是否变化 —— 都为 0 说明它对布局零贡献，多为**幻影**（只作参考，不单独定案）。
+
+两态复测（两个抽屉**收起/展开**，我的驱动 + lead 的探针各跑一遍，结论一致）：
+
+```
+我的驱动（web/_it/drive_drawers.mjs，跑完已删）：15/15
+  both_closed: 0 零尺寸 / 0 真实重叠；left=display:none h=0，params=display:none h=0
+  both_open  : 0 零尺寸 / 0 真实重叠；left=block，params=flex（没被误藏）
+  当场复现修复前状态（内联 display 覆盖我的规则）：
+    收起态 body 矩形 h=678px（与 verifier 同值）、与「建 study」重叠 71917 px²
+    elementFromPoint 命中 DIV.condopt-plan-build，堆叠栈 [.condopt-plan-build, .condopt-kickoff-plan,
+      .stream, .panel, .workbench] —— **栈里没有那个 body**
+    布局增量 Δy=0、ΔscrollHeight=0  ⇒ 判定「幻影」（与 verifier 结论一致）
+    复原我的规则后 body h=0  ⇒ F10 修复生效
+lead 的探针（我只加了选择器，判定逻辑未动）：
+  默认态      : 零尺寸 0 / 原始相交对 0 / 真实 0 / 幻影 0 / exit 0
+  --all-open  : 零尺寸 0 / 原始相交对 0 / 真实 0 / 幻影 0 / exit 0
+```
+
+（重叠面积我与 verifier 量到 71917 vs 41566：**矩形高度一致（678px）**，面积差来自两者当时的
+滚动位置不同 —— 未裁切的原始矩形会随滚动变化，这正好印证了「必须裁切感知」。
+我按可滚动祖先裁切后重算的是 71917。）
+
+截图：`_shots/f10_both_closed.png`（两抽屉收起、收起态 0 矩形）、
+`_shots/f10_both_open.png`（两抽屉展开）、`_shots/f10_after_build.png`（建 study 后）。
+
+### 8.5 真端点实测（`py -3 server.py`，30+6 项断言）与截图
+
 
 ```
 kickoff（真后端）          36/36
 kickoff/offline（纯静态）   9/9    ← 无任何 /api 也不白屏
-kickoff/params → 磁盘      7/7    ← 参数页改动落到 runs/<id>/config.json（见 §8.4）
+kickoff/params → 磁盘      7/7    ← 参数页改动落到 runs/<id>/config.json（见 §8.6）
 ```
 覆盖：首屏是聊天而不是表单 / 助手说人话（「越大越好还是越小越好」，无 `direction` 术语）/
 芯片 ≥2 / 5 轮内收敛到 `options` 且 2–4 张卡 / 卡片字段齐全 / 唯一 `recommended` /
@@ -420,7 +472,7 @@ kickoff/params → 磁盘      7/7    ← 参数页改动落到 runs/<id>/config
 `kickoff_6_advanced.png`、`kickoff_7_disqualified.png`、`kickoff_8_spec_warning.png`、
 `kickoff_offline_1_chat.png` … `kickoff_offline_3_plan.png`。
 
-### 8.4 `init` 的 `params`（task-15 已落地，端到端验证到磁盘）
+### 8.6 `init` 的 `params`（task-15 已落地，端到端验证到磁盘）
 
 契约 §10.4 说 `payload:{answers, algorithm, params}`。历史经过：先实测当前后端 `init` 白名单
 只有 `['algorithm','answers','batch','budget','id']` → 带 `params` 会 422「init 的 payload 未知字段: params」；
@@ -488,6 +540,9 @@ py -3 _verify\geom_probe.py
 `layout_fix_2_advanced_open.png`。`_verify/geom_probe.py` 的 `sel` 里追加了 §8 的新容器选择器
 （`#condoptKickoff` / `#condoptKickoffPlan` / `#condoptAdvanced` / `.condopt-advanced-body`），
 **判定逻辑一字未改**。
+
+> 同类的第二个抽屉 `.condopt-advanced-params`（参数页的高级参数）后来在 task-18 补了同款规则，
+> 见 §8.3；「幻影重叠 vs 真实重叠」的判据见 §8.4。
 
 ## 10. 未决 / 需要注意
 

@@ -1208,3 +1208,406 @@ py -3 _verify\v13_import.py
 | probe_devnames / probe_longid | 15/15、2/2 PASS |
 
 **唯一未测项**：NUL 密钥（Windows 无法把含 NUL 的值放进环境变量）→ **BLOCKED**，不计 PASS。
+
+
+---
+
+## 21. 对话式开工独立验收（CONTRACT §10，2026-11-21）
+
+> 仓库：`<repo>`（独立仓库，condopt 从同级检出解析）。
+> 基线哈希（`_verify/logs/revision_hashes_task16.txt`）：
+> `server.py=CB89DC4EF8EF6EC7`、`bridge.py=BEDA3AE34EF2539E`、`CONTRACT.md=A804774AA8D8195B`、
+> `tests/test_kickoff.py=70E77E6945144335`、`web/index.html=C45FCA1FA8E659DD`、
+> `web/assets/kickoff.js=BA4BBB351C008CEA`、`web/assets/condopt.js=D83F1466D921613D`、
+> `web/assets/app.css=B935FD05325B974D`。
+> 原则不变：**实现者的自证不算证据**；14 条必测逐条自己重跑，并补了我自己的对抗用例。
+
+### 21.0 结论速览
+
+| 组 | 必测 | 结果 | 证据 |
+|---|---|---|---|
+| A | 1 版面 gate | **PASS**（0 零尺寸 / 0 重叠 / exit 0） | `logs/geom_probe_console.txt` |
+| A | 2 四状态几何（真实浏览器） | **PASS**（12/12；9 个 raw 重叠全部证伪为幻影） | `logs/v21_geom_console.txt` |
+| A | 3 关闭的 `<details>` 是否占版面 | **PASS**（收起态 0 高 + `display:none`；基线对照证明默认行为确实会占 317px） | 同上 |
+| B | 4–9 chat/plan/离线 | **PASS**（44/44） | `logs/v21_kickoff_console.txt` |
+| C | 10–12 init params | **PASS**（含 4 类 422 + 无残留目录） | 同上 |
+| — | §10.5.5 前端 + 真点「建 study」 | **PASS**（10/10，服务端真的建出 run） | `logs/v21_frontend_console.txt` |
+| D | 13 全量 pytest + selftest | **PASS**（**101 passed**；selftest **9/9**） | `logs/full_pytest_console.txt` |
+| D | 14 既有语义单跑 | **PASS**（3 个用例 + 我自己用真实 HTTP 复验 3/3） | `logs/v21_regression3_console.txt`、`logs/v21_regression_semantics_console.txt` |
+
+**FAIL：0 条。** 另有 2 条低危观察（F9 展示层、P1 探针盲区）见 §21.9。
+
+### 21.1 A1 版面 gate（lead 的硬 gate）
+
+```powershell
+py -3 _verify\geom_probe.py
+→ visible boxes: 9 / 15（取决于 demo 状态）
+→ zero-size boxes (被压扁的容器): 0
+→ suspicious overlaps (ratio<=0.92): 0
+→ EXIT=0
+```
+**PASS** — 证据：`logs/geom_probe_console.txt`。
+我另外**把 kickoff 新 UI 的容器加进它的 `sel` 列表**（task-16 允许的唯一改动）后再跑，
+仍是 0/0/exit 0：`logs/geom_probe_extended_console.txt`。
+
+### 21.2 A2 四状态几何（真实 Edge + 我扩的选择器）
+
+因为 `geom_probe.py` 只覆盖一个 URL（且带 `?demo=kickoff`，会先跑 SSE），我另写了
+`_verify/v21_geom_states.py`：在**同一个浏览器会话**里把 UI 驱动到四种状态，每态取几何、
+按 `geom_probe` **相同的判定公式**（零尺寸 ≤1px；非父子包含关系且 ratio>0.92 算可疑重叠）算一遍。
+
+```
+S1 首屏      原始口径 零尺寸=0 重叠=0
+S2 选项态    原始口径 零尺寸=0 重叠=1
+S3 参数页    原始口径 零尺寸=0 重叠=4
+S4 抽屉打开态 原始口径 零尺寸=0 重叠=4
+== task-16 A2/A3 · kickoff 四状态几何: 12/12 PASS ==
+```
+
+**9 个 raw 重叠我没有直接报缺陷，而是逐个做了「是否真的被绘制」的判定**，结论全是幻影：
+
+```
+[.condopt-kickoff-head × .condopt-bubble[6]]  in_stack_a=True in_stack_b=False 栈深=8 top=div.condopt-kickoff-head
+[.condopt-plan-build × .condopt-param[5]]     in_stack_a=False in_stack_b=False 栈深=0 top=None
+[.condopt-plan-build × .condopt-param[6]]     in_stack_a=False in_stack_b=False 栈深=0 top=None
+[.condopt-param[5] × .condopt-advanced-params] in_stack_a=False in_stack_b=False 栈深=0 top=None
+```
+
+判据是 `document.elementsFromPoint`（它返回**完整堆叠栈**，被压住的元素也会出现；
+被 paint-skip 或滚出裁切区的元素**不会**出现）。两类成因：
+
+1. **滚动容器裁切**：`.condopt-chat-log` / `.stream` 是 `overflow:auto`，子元素滚出可视区后
+   `getBoundingClientRect()` 仍返回**未裁切**的布局矩形，于是与上方兄弟「相交」但根本看不见。
+2. **paint-skip 幻影**：收起的 `<details>` 在 Chromium 里其内容子树不绘制，但矩形仍在。
+
+决定性反证（`_verify/v21_advparams_space.py`，见 §21.3）：把那个幻影 body 强行设 `display:none`，
+**`build_y` 与 `scrollHeight` 变化都是 0** —— 说明它对布局的真实贡献为零。
+
+> **这条我踩过一个坑，如实记录**：我第一版只做「裁切感知」修正（把元素矩形与 `overflow!=visible`
+> 祖先求交），结果 S3/S4 的 4 个重叠被错误地「消掉」了 —— 而同一个重叠在**滚到底**时又真实可见。
+> 两种口径都不对：裁切感知会漏，原始口径会误报。最后是「三方交叉」才定案：
+> ① `elementsFromPoint` 堆叠栈成员判定 ② 强行 `display:none` 的布局增量 ③ 截图人眼确认。
+
+### 21.3 A3「关闭的 `<details>` 仍占版面」——我自己量
+
+```
+抽屉（#condoptAdvanced）收起态实测：
+{"open": false, "bodyHidden": true, "bodyDisplay": "none", "bodyH": 0, "formHidden": true, "formH": 0, "advH": 44}
+Chromium 基线（未加 display:none 的关闭 details）：
+{"open": false, "innerH": 317, "display": "block", "contentVisibility": "visible", "detailsH": 23}
+```
+- 现状**已修**：收起时 body `display:none` + `hidden`，高度 0，抽屉只剩 summary 的 44px；
+  机制是 `app.css:L1133` 的 `.condopt-advanced:not([open]) > .condopt-advanced-body { display:none }`
+  加 JS 的 `body.hidden = !advanced.open` 双保险。
+- 基线对照证明**这个修复是必要的**：不加处理时关闭的 `<details>` 内容确实仍占 317px。
+
+我另外发现**新出现的**兄弟抽屉 `.condopt-advanced-params`（高级参数）**没有**同样加固：
+它的收起态 body 仍报 678px 矩形，而 `plan-build` 位于 y=606 —— 两者矩形重叠 41,566 px²。
+但经上面三项判定，这是 **paint-skip 幻影、非缺陷**（`display:none` 增量 0、命中测试落在 build 按钮上、
+截图干净、开/关切换后 build 位置复原）。**记为低危加固不对称（F10），建议补一条同款 CSS**，见 §21.9。
+
+### 21.4 B4–B9 对话与参数页（44/44）
+
+```powershell
+py -3 _verify\v21_kickoff.py
+== §10 对话式开工（API 侧）: 44/44 PASS ==
+```
+关键原文：
+```
+[PASS] 4.1 state:{} → 422 E_VALIDATION  message="state.step 非法: 'None'" hint='允许: objective, budget, …, done'
+[PASS] 4.2 state:null 等价于省略 → 200
+[PASS] 5.1 五轮内收敛：step=='options' 且 2<=len(options)<=4  chip 答案轮数=5 options=4 keys=['bayes','sobol','lhs','random']
+[PASS] 5.3 recommended 唯一  → ['bayes']
+[PASS] 5.4 **我自己调 condopt.router.route() 复算** 我复算=bayes == 响应 recommended=bayes == candidates.recommended
+[PASS] 5.5 用芯片 label（按钮点击回传文本，走 _match_chip）也能推进到下一步
+[PASS] 6.1 信息不足 → 停在**缺的那一步**（variables），options=None（不凑答案）
+[PASS] 6.2 reply.text='还差 **至少一个可调条件及其范围** 才能给你算法选项，所以先停在「variables」…不会用一个凑出来的选项糊过去'
+[PASS] 7.1 free_text 乱输 → 停在 objective、options=null、'这句我没解析出需要的信息，所以不敢替你猜'
+[PASS] 8.1 plan.params 与 registry.describe_all()[bayes].params 逐字段一致（name/type/default/choices）  参数数=12
+[PASS] 8.2 plan.why == 我自己复算的 router.route().rationale（3 条逐字相同）
+[PASS] 9.1 阳性对照：socket 补丁确实能拦住一次真实连接
+[PASS] 9.2 屏蔽 socket 后 chat→plan→init 全部跑通  步进=['objective','budget','variables','noise','constraints','options']
+```
+`router` 复算方式：取 `plan` 返回的规范 `answers` → 我自己 `condopt_prepare.parse_answers()` +
+`condopt_router.route(context)`，与响应里的 `recommended` / `why` 对比 —— **不是**读响应的自述。
+
+### 21.5 C10–C12 init params
+
+```
+[PASS] 10.1 完整平表 → config.json 的 params **逐字等于**传入值（12 个键）
+[PASS] 11.1 部分平表 → 传入键原样落地 且 整体 == registry.validate_params(algo, 传入)
+[PASS] 12.1 未知键 → 422 'params 含 bayes 没有的参数: no_such_param'
+[PASS] 12.1 非法值 → 422 "params 取值不合法: param 'kernel': expected one of ('matern52','matern32','rbf')…"
+[PASS] 12.1 嵌套结构 → 422 'params 必须是平表，这些键的值是嵌套结构: kernel'
+[PASS] 12.1 params 非对象 → 422 'params 必须是平表对象 {参数名: 值}'
+[PASS] 12.2 ×4 → **不留残留 run 目录**（逐条查目录，均为 False）
+[PASS] 12.3 algorithm='auto' + 非空 params → 422 'auto 路由自己决定算法…'
+[PASS] 12.5 不传 params → 仍 200（旧行为兼容）
+```
+
+### 21.6 §10.5.5 前端 + 真点「建 study」
+
+```powershell
+py -3 _verify\v21_frontend_kickoff.py
+== §10.5.5 前端一致性 + 建 study 端到端: 10/10 PASS ==
+```
+```
+首屏：{"has_chat_log": true, "chat_visible": true, "adv_open": false,
+       "form_hidden": true, "visible_form_inputs_on_first_screen": 0, "chips": 3}
+选项态：{"cards": 4, "all_buttons": true, "has_title": 4, "has_one_line": 4, "has_why": 4,
+        "has_tradeoff": 4, "recommended_badges": 1, "raw_urls": 0}
+参数页：{"plan_head": true, "why_items": 3, "params": 12, "with_label": 12, "with_plain": 12,
+        "with_impact": 12, "advanced_default_collapsed": true,
+        "build_btn_text": "建 study（走 POST /api/action init）"}
+点击前 runs=[]；点击后新增=['run-20261121-0131']；UI 里的 run id='run-20261121-0131'
+新 run 的 config.params：algorithm='bayes' params 键数=12 /** 只新增 1 个，无残留中间态 **/
+```
+即：首屏确实是聊天（表单字段可见数 0）、选项是**真按钮**（无裸 URL）、参数页有解释与默认折叠的
+advanced、点「建 study」**真的**走 `init` 并在服务端建出 run。
+
+### 21.7 D13 全量回归
+
+```powershell
+py -3 -m pytest            → 101 passed in 25.37s       FULL_PYTEST_EXIT=0
+py -3 server.py --port 0 --selftest → 9/9 通过，exit 0
+收集数：tests/test_kickoff.py 35 + test_workbench.py 31 + test_workbench_import.py 35 = 101
+```
+**PASS** — 证据：`logs/full_pytest_console.txt`、`logs/selftest_console.txt`。
+selftest 现在含两条导入用例（错误后缀 400、无效 scan_id 400），比上轮多 2 条。
+
+### 21.8 D14 既有语义未被破坏
+
+单跑三条最相关的既有用例：
+```powershell
+py -3 -m pytest tests/test_workbench.py::test_sse_kickoff_frames \
+                 tests/test_workbench.py::test_ask_is_never_silently_repeated \
+                 tests/test_workbench_import.py::test_apply_budget_validation -v -o addopts=""
+→ 3 passed in 0.83s   EXIT=0
+```
+**并且我没有只跑他们的测试**，另用真实 HTTP 自己复验了这三条语义（`_verify/v21_regression_semantics.py`）：
+```
+[PASS] 1) SSE：帧名 ⊆ {meta,stage,delta,notice,error,done}，首 meta 末 done，stage indices=[0,1,2,3]
+[PASS] 2) q9 冲突：二次 ask → 409 E_CONFLICT，pending 仍 2、remaining 未多扣（6→6）
+[PASS] 3) 导入 budget：budget=3 < 30 行 → 422 且 suggested_budget=40、run 未创建
+== 3/3 PASS ==
+```
+
+### 21.9 本节发现的问题（均非 FAIL）
+
+> **注（2026-11-21 01:55 追记）**：本节写成时 F9 尚未修复；**在我准备复验的这段时间里
+> task-17 已落地**，我已用独立实现的检查器复验并确认修复，行内状态已更新为「已修」。
+> 原始证据（当时的 `plain` 文本与 `PARAM_DISPLAY` 键形态）保留在下方，以便对照。
+
+| 编号 | 内容 | 严重度 | 状态 |
+|---|---|---|---|
+| **F9** | **`PARAM_DISPLAY` 只按参数名索引，跨算法共用一份文案**。实测 30 个参数名跨算法重复、其中 **5 个语义签名不同**（`acquisition`/`alpha`/`batch_strategy`/`mc_draws`/`n_candidates`）。最具体的例子（**修复前**）：`acquisition` 的人工文案写「pi 更偏利用；ts 用后验采样」，但 `mfbo` 的 choices 只有 `['ei','logei','ucb']` —— 文案列举了该算法**不存在的选项**。实际控件只渲染 registry 给出的合法选项，用户选不到非法值，所以**是文案问题、不是功能问题** | 低（展示层） | ✅ **已修（task-17）并经我独立复验**，见 §21.12 |
+| **F10** | **两个 `<details>` 抽屉的收起态加固不对称**。`#condoptAdvanced` 有 `:not([open]) > body{display:none}`（app.css:L1133），新的 `.condopt-advanced-params` 没有。收起时其 body 仍报 678px 矩形并与「建 study」块重叠 41,566 px² —— 但我已用三重判定证明这是 **paint-skip 幻影、当前无用户可见影响**（`display:none` 增量 0、命中测试落在 build 按钮、截图干净、开/关可复原） | 低（潜在/加固） | ✅ **已修（task-18）并经我复验**（两态 3/3 + 4/4，含「收起不影响取值」独立验证），见 §21.13 |
+| **P1** | **`geom_probe.py` 的判据有系统性盲区**：① 只测一个 URL/状态，选项态与参数页完全没覆盖；② 矩形相交无法区分「真绘制」与「滚出裁切区 / paint-skip 的幻影矩形」，**既会误报也会漏报**。我的 9 个 raw 重叠全部是幻影，若直接采信就会报 9 个假缺陷 | 中（工具） | ✅ **已修（lead 重写为三重判据）并经交叉对照**：他的判据跑我的四种状态，逐态与我的结论一致，见 §21.13 |
+| **F11** | **task-17 守卫的一处缺口（我在负对照里抓到的）**：`test_param_copy_never_lies` 的「默认 X」检查带 `claimed in known` 前置，导致**任意而错误的数字**（如「默认 4096」而 registry 默认 1024）被静默忽略，与它 docstring 宣称的严格度不一致 | 低（守卫/测试） | ⬜ 建议去掉该前置 + 数字规范化，见 §21.13 |
+
+**FAIL 最小复现**：无（0 条 FAIL）。
+F9 的复现：`py -3 -c` 见 §21.9 上方代码块，或直接 `plan` 一个 `mfbo` 看 `acquisition` 的 `plain`。
+F10 的复现：`py -3 _verify\v21_advanced_params_overlap.py`、`py -3 _verify\v21_advparams_space.py`。
+
+### 21.10 我没测到 / 测不了的部分
+
+| 项 | 状态 | 原因 |
+|---|---|---|
+| `--import-llm` 开启时「模型润色 `reply.text`」这条通道（§10.4） | **未测** | 契约说它**只润色措辞、不改 JSON/路由**，失败必须回落。默认关闭；我没有既开 `--import-llm` 又架 stub 网关去驱动聊天润色路径 |
+| 真实键盘输入 / 中文 IME 在聊天框里的表现 | **未测** | 我用的是 API 驱动 + JS 点击芯片；没有模拟逐键输入与 IME 组合态 |
+| `?demo=<key>` 与新聊天 UI 的共存 | **未测** | lead 提示该参数会自动跑一遍 SSE；为避免状态混淆我全程用不带 `demo` 的 URL。**这也意味着「带 demo 时聊天窗是否仍然正确」没被覆盖** |
+| 06 导入场景里「我贴一份 →」分支的前端联动（`defer_to_import`） | **未测** | 我在 API 侧读到了该分支（`state.answers.defer_to_import`），但没有在 UI 里点那颗芯片走完整链路 |
+| 旧 45 字段表单的**逐字段**功能 | **部分** | 只验证了它默认收起、展开后渲染 45 个字段、打开态无重叠；没有逐字段改值再建 study 比对 |
+| 深色主题 / 演示视图 / `1`–`6` 快捷键在聊天 UI 下的表现 | **未测** | 时间与范围所限，只测了浅色默认态 |
+| 移动端/窄屏布局 | **未测** | 只在 1344×896 一种视口下测几何 |
+
+### 21.11 我最担心的一处风险
+
+> **2026-11-21 01:55 追记**：下面这条风险在**我准备复验的期间**已被 task-17 处理（见 §21.12），
+> 因此它现在是「已缓解 + 留有独立检查器」的状态。原文保留，便于对照当时的判断。
+
+**`plan` 的展示层文案与算法库之间没有机器可校验的绑定 —— 这次只差一步就真的说错了。**
+
+§10.3 要求 `label`/`plain`/`impact` 是「展示层增补」并标明来源（这点实现**做到了**，
+`display_source` 字段齐全，我逐条验过回落分支）。但 `PARAM_DISPLAY` 是**按参数名**索引的人工表，
+而实测 30 个参数名跨算法复用、5 个语义签名不同。这次的 `acquisition` 文案已经列举了 `mfbo`
+**不存在的 `pi`/`ts` 选项**（因为控件只渲染 registry 的 choices，用户点不到，所以没造成事故）。
+
+我担心的不是这一条，而是**这类文案没有任何自动化检查**：`test_kickoff.py` 只断言结构与
+`display_source`，不会、也无法判断「人工文案里描述的范围/选项是否属于该算法」。只要以后有人
+在 `PARAM_DISPLAY` 里写一句带数字或选项名的说明（例如「默认 1024」「支持 pi」），它就会对
+部分算法**静默说错**，而所有门禁仍然全绿。建议二选一：(a) `PARAM_DISPLAY` 按
+`(algorithm, name)` 索引；(b) 加一条测试，禁止人工文案里出现数字或 `choices` 字面量
+（把数字/选项交给 registry 渲染，文案只做定性描述）。我倾向 (b)，它同时把 F9 一起解决。
+
+
+### 21.12 复验追记：F9 已修（task-17），我的独立检查器 5/5
+
+写 §21 时 F9 是未修状态；**在我准备复验的这段时间里 task-17 已落地**。我没有采信「已修」的说法，
+而是自己写了一个**独立于实现者的对照检查器** `_verify/v21_f9_param_copy.py` 去验，并先确认
+「检测器真的会抓到谎言」（负对照），再跑真实数据。
+
+**修复形态（我读代码 + 跑 API 双向确认）**：
+```
+bridge._param_display 签名 = (algorithm: str, param: Mapping) -> dict      ← 改动 (a)
+PARAM_DISPLAY 键：tuple(algorithm,name)=6 个，name-only=31 个            ← 保留 name 兜底
+tuple 键样例 = [('bayes','acquisition'), ('constrained','acquisition'), ('cqehvi','acquisition'),
+               ('cqnehvi','acquisition'), ('qehvi','acquisition'), ('qnehvi','acquisition')]
+
+mfbo.acquisition  → plain="ei/logei 平衡探索与利用；ucb 更偏探索。其余取值以控件列出的为准。"
+bayes.acquisition → plain="ei/logei 平衡探索与利用；ucb 更偏探索；pi 更偏利用；ts 用后验采样。"
+```
+即：`bayes` 这类**合法拥有** pi/ts 的算法保留精确文案；`mfbo` 这类不拥有的走**不复述选项**的兜底文案。
+
+**我的独立检查器结果**：
+```
+py -3 _verify\v21_f9_param_copy.py
+扫描 18 个算法 / 196 个参数条目
+[PASS] C1 文案里的 choice 字面量都合法（对本算法）  违规 0 处：无
+[PASS] C2 文案里的「默认 X」都等于 registry default  违规 0 处：无
+[PASS] 自检（负对照）：检测器对『提到非法 choice』的文案会 fire、对合法文案与子串不 fire
+       旧版 mfbo.acquisition 文案（提到 pi/ts）: fired=True（期望 True）；
+       合法文案（只提本算法有的）: fired=False（期望 False）；
+       token 边界：its 里的 ts 不算: fired=False（期望 False）
+[PASS] 修复形态：PARAM_DISPLAY 已有 (algorithm, name) 键；name 兜底文案不再列举算法特有选项
+       tuple 键 6 个；兜底 acquisition 文案='ei/logei 平衡探索与利用；ucb 更偏探索。其余取值以控件列出的为准。'
+== F9 展示文案是否对该算法说谎（独立对照实现）: 5/5 PASS ==
+```
+> **关键点：第 3 条是「检测器自检」**。我第一版把「应当报出 mfbo.acquisition」写成断言 ——
+> 修完之后那条**必然**变成 FAIL，而 FAIL 的原因是「没有 bug 可报」，不是检测器失灵。
+> 这种断言在修复后就失去意义，所以我改成**不依赖实现状态的负对照**：
+> 用**旧版的文本样本**喂给检测器，要求它 fire；用合法文案与 `its`（含 `ts` 子串）要求它不 fire。
+> 这样「检测器会不会抓错」这件事**永远可验证**，与实现是否还有 bug 无关。
+
+**我覆盖的口径说明**（与 lead 的裁定 (b) 对齐并做了一处自己的取舍）：
+- 我**不禁数字**（同意 lead 的细化）：`「噪声大就调大（0.01–0.1）」` 是工作台**建议区间**，
+  不是对库的断言，禁它会误伤有用信息。
+- 我只校验两类**可证伪断言**：文案里出现的 **choice 字面量**必须属于本算法的合法 choices；
+  出现 **「默认 X」** 时 X 必须等于本算法的 registry default。
+- 字面量匹配用 `(?<![0-9A-Za-z_])literal(?![0-9A-Za-z_])` 做 token 边界判断，
+  避免 `ts` 命中 `its`（自检里专门有这一条）。
+
+**仍未做的对照**（等 lead 的 task-17 测试与负对照证据、task-18）：
+- 与 api-backend 的 `test_param_copy_never_lies` 做**互相对照**（两条独立实现应给出一致结论）；
+- lead 要求的「故意写错 choice → 测试必须红」的负对照证据，我会看它的实现是否也能 fire（我这份已自证能 fire）；
+- F10 两态归零；
+- lead 新版 `geom_probe.py` 与我的 `v21_geom_states.py` 跑同一批状态、结论一致。
+
+
+### 21.13 第二轮复验（F9 / F10 修复后 + 新版探针交叉对照，2026-11-21 02:20）
+
+写 §21 之后，**F9（task-17）与 F10（task-18）的修复都已落地**，lead 也重写了 `geom_probe.py`。
+我按约定的复验范围全部重跑，并在过程中发现**我自己脚本的一个判据 bug**（见下），一并修好。
+
+**新基线哈希**（`logs/revision_hashes_task16_round2.txt`，与 §21 开头旧基线对照）：
+
+| 文件 | 旧基线 | 新基线 | 说明 |
+|---|---|---|---|
+| `bridge.py` | `BEDA3AE34EF2539E` | **`1B8B904925701AEA`** | task-17（F9） |
+| `web/assets/app.css` | `B935FD05325B974D` | **`047B679E7BD689DA`** | task-18（F10） |
+| `tests/test_kickoff.py` | `70E77E6945144335` | **`B5F069DAD275DB47`** | +3 项测试（101→**104**） |
+| `_verify/geom_probe.py` | `ACFE3E17EC6032D0` | **`632AA0E14856E1B5`** | lead 重写为三重判据 |
+| `server.py` / `CONTRACT.md` / `kickoff.js` / `condopt.js` | — | 与旧基线**相同** | 未受影响 |
+
+#### 复验结果总表
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| 全量回归 | `py -3 -m pytest` | **104 passed in 37.35s**（旧 101 → 新增 3 项即 F9 守卫） |
+| selftest | `py -3 server.py --port 0 --selftest` | **9/9**，exit 0 |
+| §10 API 侧 | `py -3 _verify\v21_kickoff.py` | **44/44 PASS**（bridge 改动未破坏任何一条） |
+| §10.5.5 前端 | `py -3 _verify\v21_frontend_kickoff.py` | **10/10 PASS**（真点「建 study」仍建出 run） |
+| 既有语义 | `py -3 _verify\v21_regression_semantics.py` | **3/3 PASS** |
+| F9 独立检查器 | `py -3 _verify\v21_f9_param_copy.py` | **5/5 PASS** |
+| F9 负对照 | `py -3 _verify\v21_f9_negative_control.py` | **5/6**（发现守卫一处缺口，见下） |
+| F10 两态 | `v21_advparams_space.py` / `v21_advanced_params_overlap.py` | **3/3** / **4/4 PASS** |
+| 几何交叉对照 | `py -3 _verify\v21_crosscheck.py` | **7/7 PASS** |
+| 四状态几何 | `py -3 _verify\v21_geom_states.py` | **12/12 PASS** |
+
+#### F10：确认修好（两态归零 + 无副作用）
+
+```
+as-is (closed)   det_h=36  body_h=0  body_display=none  build_y=1657  scrollHeight=1647
+body display:none det_h=36  body_h=0  body_display=none  build_y=1657  scrollHeight=1647
+```
+收起态 body 现在 `display:none`、高度 **0**（修复前是 678px 幻影矩形）；开/关切换后 build 位置复原。
+加固已与旧抽屉**对称**（`app.css:L1383`）。
+
+**web-shell 的关键论断我自己验了**（§21.13 的 B 组）：他们把参数抽屉做成**纯 CSS** `display:none`
+而非 JS 设 `hidden`，为的是收起态仍能被 `readParams()` 读到值。我实测：
+```
+展开抽屉 → 把 n_candidates 改成 777 → 收起抽屉 → 点「建 study」
+→ 新 run=run-20261121-0219，config.params.n_candidates = 777  ✅
+```
+即**收起不影响取值**，这个做法没有副作用。
+
+**连带效果**：F10 修好后，我四状态里的 raw 相交对从 **9 个降到 3 个**，且剩下的 3 个全是同一个
+幻影（滚出 `.condopt-chat-log` 的聊天气泡）。
+
+#### 几何判据交叉对照（lead 的判据 × 我的状态覆盖）
+
+我把自己驱动的**四种状态**接上 **lead 新版 `geom_probe.py` 的判定代码**（复用它的
+`MEASURE_JS % SELECTORS`，不是我重写一份），与我的判据逐态比对：
+
+```
+S1 首屏     我 0/0 | lead 可见块=13 零尺寸=0 原始相交=0 真实=0 幻影=0
+S2 选项态   我 0/0 | lead 可见块=28 零尺寸=0 原始相交=0 真实=0 幻影=0
+S3 参数页   我 0/0 | lead 可见块=40 零尺寸=0 原始相交=0 真实=0 幻影=0
+S4 抽屉打开态 我 0/0 | lead 可见块=56 零尺寸=0 原始相交=0 真实=0 幻影=0
+== 交叉对照: 7/7 PASS ==
+```
+**四种状态两套判据逐态一致**，没有出现「一方报问题、另一方漏掉」。lead 新版把 paint-skip 与
+裁切过滤做进了页面侧 JS，所以幻影对**根本没进相交列表**（原始相交=0）；我的实现是在 Python 侧
+过滤，结论相同。**这条对照才算把「lead 的硬 gate」与我的覆盖合上了。**
+
+#### F9：修复确认 + **我发现守卫仍有一处缺口**（负对照抓出来的）
+
+修复形态（读码 + API 双向确认）：`_param_display(algorithm, param)`；`PARAM_DISPLAY` 现有
+**6 个 `(algorithm, name)` 精确键 + 31 个 name 兜底键**；`bayes` 保留 pi/ts 精确文案，
+`mfbo` 走不复述选项的兜底文案。我的独立检查器 C1/C2 **全绿**（18 算法 / 196 参数条目，违规 0 处）。
+
+**负对照（我独立做的，不靠 api-backend 的自述）**：在内存里篡改 `bridge.PARAM_DISPLAY` 后
+**直接调用他们自己的守卫函数** `test_param_copy_never_lies`，看它是否红：
+
+| 篡改 | 期望 | 实际 |
+|---|---|---|
+| 未篡改（对照 0） | 绿 | ✅ 绿（证明守卫不是「永远红」） |
+| `("mfbo","acquisition")` 文案写「pi 更偏利用」 | 红且点名 | ✅ **红**，信息：`PARAM_DISPLAY[('mfbo','acquisition')].plain 提到 'pi'，但 mfbo 的 acquisition choices 是 ['ei','logei','ucb']` |
+| **通用** `acquisition` 文案写 pi（走兜底键路径） | 红 | ✅ **红**（同时点名 mfbo 与 mfparego） |
+| `("bayes","n_candidates")` 写「默认 **4096**」（registry 默认 1024） | 红 | ❌ **绿 —— 没抓住** |
+| 建议区间「0.01–0.1」（防过严的反向对照） | 绿 | ✅ 绿（未被误杀） |
+| 恢复原数据后 | 绿 | ✅ 绿（无副作用残留） |
+
+**缺口的根因**（`tests/test_kickoff.py:668-680`）：
+```python
+for claimed in re.findall(r"默认[值是为：:]*\s*([A-Za-z0-9_.+-]+)", text):
+    ...
+    known = {str(actual)} | {str(item) for item in choices}
+    if claimed in known and claimed != str(actual):      # ← 关键
+        problems.append(...)
+```
+`claimed in known` 这个前置条件意味着：**只有当「文案里说的值恰好是某个已知值（默认或某个 choice）、
+但又不等默认」时才会报**。若文案写的是一个**任意而错误的数字**（4096），它不在 `known` 里，
+于是被**静默忽略**。这与该测试的 docstring（「出现『默认 X』时 X 必须等于该算法的 registry default」）
+不一致 —— **守卫宣称的比它实际执行的更严**。
+
+> 严重度：**低**（测试/守卫缺口，不是产品缺陷；当前文案恰好都说真话）。
+> 但它是「门禁给了虚假的安心」这类问题：F9 的风险本就是「文案静默说错」，
+> 而这条缺口正是同一个洞的另一半。我自己的检查器 `v21_f9_param_copy.py` 的 C2 用了
+> `str` 比较 + `float` 兜底，能抓住 4096 这一例（这也是两边口径的差异，建议对齐）。
+> **建议**：去掉 `claimed in known` 前置（改为「不等于 default 即报」，并对数字做数值规范化，
+> 避免 `1e-6` vs `1e-06` 误报），或至少同步 docstring 与实现。
+
+#### 我修掉的**自己脚本**的判据 bug（如实记录）
+
+F10 修好后的第一次重跑，我的 `v21_geom_states.py` 报了 **7 个零尺寸**（`.condopt-param[5..11]`）。
+排查后确认这是**我的探针 bug，不是产品缺陷**：那些行自身是 `display:flex`，但其祖先
+`.condopt-advanced-params-body` 现在是 `display:none`，`getBoundingClientRect()` 返回 **0×0**；
+我的页面侧过滤只查了「自身 display / `[hidden]` 祖先」，**没查祖先的 `display:none`**，
+于是把「未渲染」误判成「被压扁的容器」。而 lead 的新探针有 `paintSkipped`，所以没这个假阳性。
+
+修法（`v21_geom_states.py`）：加一条 `if (el.getClientRects().length === 0) return;`
+—— 无 client rect = 未渲染，一条覆盖自身/祖先 `display:none` 与收起 `<details>` 内容。
+修后四状态 **12/12 PASS**。
+**这条与 §21.2 里那个「裁切感知反而消掉真实重叠」是同一类错误的两个方向**：
+矩形几何单独看，既会把幻影当真、也会把真渲染当零尺寸；必须叠加「是否绘制」的判据。

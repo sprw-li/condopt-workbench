@@ -1375,6 +1375,12 @@ html[data-theme="dark"] {
 }
 .condopt-advanced-params > summary::-webkit-details-marker { display: none; }
 .condopt-advanced-params > summary .hint { margin-left: 7px; font-weight: 400; font-size: 10.4px; color: var(--muted); }
+/* F10（verifier 低危加固建议，2026-11-21）：与旧抽屉 `.condopt-advanced` 对称 —— 收起态**不依赖**
+   UA 对 `<details>` 子树的 paint-skip 行为。收紧前实测它的 body 收起时仍报 678px 幻影矩形
+   （与「建 study」块重叠 41,566 px²，经 verifier 三条证据确认无用户可见影响）。
+   ⚠ 这里不能用 `hidden` 属性（后端下发的 7 个高级参数必须仍被 `readParams()` 读到值）：
+   `display:none` 不影响 `querySelectorAll` 取 `.value`/`.checked`，只是不参与布局。 */
+.condopt-advanced-params:not([open]) > .condopt-advanced-params-body { display: none; }
 .condopt-advanced-params-body { padding: 0 11px 11px; display: flex; flex-direction: column; gap: 8px; }
 .condopt-plan-build {
   display: flex;
