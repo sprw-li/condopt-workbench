@@ -1694,7 +1694,23 @@ sidebar 仍 `display:flex`），方向一致、程度略强于实测。**不构�
 
 ### 21.15 视口矩阵扩到 ≤680px（`viewport_matrix.py`）+ 一处不可复现抖动 + 一个「失败要响」的正面例子
 
-我在 `_verify/` 下发现一个不是我写的脚本 `_verify/viewport_matrix.py`（65 行，02:52），
+> **⚠️ 本小节有两处已被后续证据更正，先读这里再读正文（2026-11-21 03:35）**
+>
+> **更正 1（我的描述过时）**：我读到的 `viewport_matrix.py` 是 **65 行、02:52 的版本**，只有
+> 4 列（零尺寸/原始相交/真实重叠/exit）。**冻结版本（`319e8fc`，60 行）已经多了两列**：
+> `OVERFLOW_RE` 与 `BREAKPOINT_RE`，即**断点命中（`mq1024`/`mq680`）与横向溢出（`scrollWidth - clientWidth`）
+> 都是实测的**。web-shell 与 lead 据此指出我错，**他们是对的**：这两项确实被量了。
+> 我当时的说法只对「我自己那套只解析三个计数的矩阵」成立，**不能推广成「那一轮没测断点与溢出」**——
+> 这是两种完全不同的结论，我已在 §21.16 用实测复现 `light 680,800 → mq680=True、溢出 0px`。
+>
+> **更正 2（我的「自我更正」本身是错的）**：正文第 3 点我写了「核对是不是端口/profile 撞车 → **不是**」，
+> 并据此把那次失败定性为「不可复现偶发」。lead 随后复现并定位到**真实根因就是调试端口竞态**
+> （固定 `--remote-debugging-port` 连跑时上一轮 Edge 未释放端口），并在 `9a44b54` 修掉。
+> **我的原始假设（端口撞车）方向是对的，我的「否认」才是错的**——我是在**已经修好的代码上**核对，
+> 于是看到 `_free_port()` 就断定机制不可能成立，忽略了「抖动发生在修复之前」这一时间关系。
+> 教训：**用「当前代码长什么样」去否定「历史上发生过的失败机制」是无效推理**，必须对齐时间线。
+
+我在 `_verify/` 下发现一个不是我写的脚本 `_verify/viewport_matrix.py`（我读到的版本 65 行，02:52），
 是个 **runner**：调 `geom_probe.py` 跑 5 配置 × 2 状态，用正则从探针 stdout 里抠出
 「零尺寸 / 原始相交 / 真实重叠 / 退出码」聚合成表，任一格非零即非零退出。
 它**多覆盖了一个我一直列为未测的区间：`light @680,800`（≤680px 单列断点）**。
@@ -1749,3 +1765,93 @@ ok = (zero == 0 and real == 0 and code == 0) # ← -1 == 0 为 False → 判非�
 **不会出现「什么都没解析到却报全绿」**。第一次那个 `-1` 正是这条路径救了场：
 如果它写成 `int(m.group(1)) if m else 0`，那 10 格里就会有一格**假的绿**，而我会把它当成通过。
 这与 F11 的教训（门禁宣称的比执行的严 / 空解析给虚假安心）恰好是一正一反两个例子。
+
+
+---
+
+### 21.16 按提交版本的冻结基线（清洁克隆，`main = 319e8fc`）
+
+**结论：PASS —— `319e8fc559acaf3830cdd734a78000a74161b06e`（短哈希 `319e8fc`）。**
+全部检查在**清洁克隆**里跑（`git clone` 只含已提交内容，天然排除工作树污染），并顺带验证
+「新克隆能不能直接跑」这个发布口径。
+
+```
+git clone D:\Dev\condopt-workbench D:\Dev\_freeze_check_verifier
+git rev-parse HEAD   → 319e8fc559acaf3830cdd734a78000a74161b06e      ✅ 与 lead 指定的冻结提交一致
+git status --porcelain → 空（clean）                                  ✅
+克隆内 runs/ 、state/ → 均不存在（符合预期；脚本各自用 common.fresh() 建自己的临时 run 根）
+克隆文件总数 = 148；server.py / bridge.py / CONTRACT.md / VERIFICATION.md / web/index.html /
+  _verify/{common.py,viewport_matrix.py,v21_kickoff.py,v21_frontend_kickoff.py,v21_f11_guard.py,v21_narrow_layout.py} 均在
+```
+
+| # | 检查 | 命令 | 期望 | 实得 |
+|---|---|---|---|---|
+| 1 | 全量回归 | `py -3 -m pytest -o addopts="" -q` | 104 passed | **104 passed in 28.40s**，exit 0 ✅ |
+| 2 | 起服务自检 | `py -3 server.py --port 0 --selftest` | 9/9 | **9/9 项通过**，exit 0 ✅ |
+| 3 | 视口×主题矩阵 | `py -3 _verify/viewport_matrix.py` | 10/10 | **10/10**，exit 0 ✅ |
+| 4 | **runner 解析自检（负对照）** | `py -3 _verify/viewport_matrix.py --self-test` | 6/6 | **6/6 全部通过**，exit 0 ✅ |
+| 5 | 矩阵（**严格按提交版本**，指向克隆自带 server） | `py -3 _verify/_freeze_matrix.py --url http://127.0.0.1:8788/` | 10/10 | **10/10**，exit 0 ✅ |
+| 6 | §10 对话式开工（API 侧） | `py -3 _verify/v21_kickoff.py` | 44/44 | **44/44**，exit 0 ✅ |
+| 7 | §10.5.5 前端 + 真点「建 study」 | `py -3 _verify/v21_frontend_kickoff.py` | 10/10 | **10/10**，exit 0 ✅ |
+| 8 | F9/F11 文案守卫 | `py -3 _verify/v21_f11_guard.py` | 16/16 | **16/16**，exit 0 ✅ |
+| 9 | 窄屏断点是否名副其实 | `py -3 _verify/v21_narrow_layout.py` | 4/4 | **4/4**，exit 0 ✅ |
+
+**1) pytest（原文尾）**
+```
+tests/test_kickoff.py: 38   tests/test_workbench.py: 31   tests/test_workbench_import.py: 35
+104 passed in 28.40s
+```
+
+**3) 提交版 `viewport_matrix.py`（10/10，含断点/溢出列）**
+```
+light  1344,896   默认态    0  0  0  exit=0  溢出 0  False/False
+dark   1344,896   抽屉全开   0  0  0  exit=0  溢出 0  False/False
+light  900,800    默认态    0  0  0  exit=0  溢出 0  True/False
+dark   900,800    抽屉全开   0  0  0  exit=0  溢出 0  True/False
+light  680,800    默认态    0  0  0  exit=0  溢出 0  True/True    ← ≤680 断点确实命中
+light  680,800    抽屉全开   0  0  0  exit=0  溢出 0  True/True
+合计 10/10 格通过（解析成功 且 零尺寸 0 且真实重叠 0 且 横向溢出 ≤1px 且 exit 0）
+```
+
+**4) runner 解析自检 6/6（`--self-test`，原文）**
+```
+[OK ] 正常样本：实得 ok=True，期望 True
+[OK ] 切削掉的样本（正则不该匹配到任何东西）：实得 ok=False，期望 False
+[OK ] 缺横向溢出行的样本：实得 ok=False，期望 False
+[OK ] 真有横向溢出的样本：实得 ok=False，期望 False
+[OK ] 数值全 0 但进程非零退出：实得 ok=False，期望 False
+[OK ] 放宽数值比较后仍能被拦：放宽后数值检查=通过(危险)，parsed=False 使其 ok=False → 已拦住
+自检：全部通过
+```
+> 第 6 条正是我提炼那条纪律（「解析失败必须返回一个不可能通过的值」）的**加强版**：
+> 它不只靠哨兵 `-1`，而是用 `Row(parsed=…)/FAILED` **先要求解析成功**，再逐条判数值
+> （`overflow` 另外要求 `>= 0`）。web-shell 指出「`overflow <= 1` 对哨兵 `-1` 成立、当时只靠
+> `zero==0` 先失败兜住」——这条已被 lead 修掉（`319e8fc`），并用上面第 6 条自检显式证明
+> 「**即使有人放宽数值比较，`parsed=False` 仍能拦住**」。**这是负对照做得对的样子**：
+> 不只测「该红的红」，还测「放宽之后仍然拦得住」。
+
+**5) 为什么还要跑第 5 项**：提交版 `viewport_matrix.py` 不传 `--url`，探针默认打
+`http://127.0.0.1:8770/`，而 8770 上是 lead 的**工作树**进程（PID 77804）——那不是提交版本。
+为了给出**严格按提交版本**的几何结论，我另用 `_verify/_freeze_matrix.py`（同配置/同正则/同判据，
+仅多传 `--url`；**未改动任何已提交文件**）指向**克隆自己起的 server**（8788）重跑：
+```
+url=http://127.0.0.1:8788/
+light  1344,896  默认态  0 0 0 exit=0  mq1024=False mq680=False 溢出 0
+light  900,800   默认态  0 0 0 exit=0  mq1024=True  mq680=False 溢出 0
+light  680,800   默认态  0 0 0 exit=0  mq1024=True  mq680=True  溢出 0   ← 与第 3 项逐格一致
+light  680,800   抽屉全开  0 0 0 exit=0  mq1024=True  mq680=True  溢出 0
+合计 10/10 格通过
+```
+即：**提交版本的几何结论与「打 8770 工作树」时逐格相同**，且 ≤680 断点命中与零横向溢出
+在新克隆里**独立复现**。
+
+**发布口径（顺带验到）**：克隆内既无 `runs/` 也无 `state/`，`v21_kickoff.py` / `v21_frontend_kickoff.py`
+仍能在克隆里从零建 run 并跑完（各自用 `common.fresh()` 建临时 run 根），说明**新克隆开箱可跑**。
+唯一外部依赖是 condopt 算法库（从同级检出解析，克隆路径仍在 `D:\Dev\` 下，解析正常）。
+
+**证据**：`D:\Dev\_freeze_check_verifier\_verify\logs\{freeze_vm.txt, freeze_vm_selftest.txt,
+freeze_matrix_bycommit.txt, freeze_v21_kickoff.txt, freeze_v21_frontend_kickoff.txt,
+freeze_v21_f11_guard.txt, freeze_v21_narrow_layout.txt}`。
+
+**残留**：临时克隆与 8788 服务仅用于本轮，验证完即停止；`_freeze_matrix.py` 是**新增的验证脚本**，
+只存在于那个一次性克隆里，**未进入仓库、未改动任何已提交文件**。

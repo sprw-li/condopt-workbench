@@ -210,6 +210,45 @@ def _wait_port_closed(port: int, timeout: float = 10.0) -> None:
             time.sleep(0.2)
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """结束 Edge **整棵进程树**：terminate 只杀主进程，子进程仍可能占着 profile 文件。"""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        proc.kill()
+
+
+def _cleanup_profile(profile: Path, settle: float = 12.0) -> None:
+    """删临时 profile，并**确认它不会自己长回来**。
+
+    踩过两次坑，记在这里：
+      1. 最早用 `shutil.rmtree(..., ignore_errors=True)` —— 删失败被吞掉，%TEMP% 攒了 16 个目录；
+      2. 改成「重试删除」后仍然漏：Edge 的子进程会在主进程被杀之后继续收尾，
+         **把刚删掉的 profile 又写回来**（残留约半份文件、`warn` 却不响，因为删的瞬间它确实不存在）。
+    所以判据必须是「删除后**连续两次确认不存在**」；`settle` 秒内还长回来就继续删，最后仍存在则报错。
+    """
+    deadline = time.time() + settle
+    clean_streak = 0
+    while time.time() < deadline:
+        if profile.exists():
+            shutil.rmtree(profile, ignore_errors=True)
+            clean_streak = 0
+        else:
+            clean_streak += 1
+            if clean_streak >= 2:          # 连续两次都没有 = 子进程已不再回写
+                return
+        time.sleep(0.6)
+    if profile.exists():
+        print(f"[warn] 临时 profile 删除失败（子进程仍在回写？），需手工清理：{profile}",
+              file=sys.stderr)
+    else:
+        print(f"[warn] 临时 profile 在 {settle:.0f}s 内才稳定删除：{profile}", file=sys.stderr)
+
+
 def cdp_measure(url: str, scenario_prefix: str | None, all_open: bool = False,
                 window_size: str = "1344,896", theme: str = "light") -> dict:
     port = _free_port()
@@ -288,12 +327,8 @@ def cdp_measure(url: str, scenario_prefix: str | None, all_open: bool = False,
             raise SystemExit("测量脚本没有返回")
         return json.loads(raw)
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except Exception:
-            proc.kill()
-        shutil.rmtree(profile, ignore_errors=True)   # 独立 profile 用完即弃，避免占空间
+        _kill_tree(proc)
+        _cleanup_profile(profile)                    # 失败会报到 stderr，不再静默吞掉
         _wait_port_closed(port)                      # 等端口真的释放，下一轮才不会竞争
 
 
