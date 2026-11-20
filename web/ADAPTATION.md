@@ -525,9 +525,31 @@ verifier 在 task-16 §21.10 把「深色主题 + 窄屏（≤1024px）」列为
 即：900×800 确实命中媒体查询、布局确实从 grid 变成 block，所以窄屏矩阵是**有效覆盖**。
 （措辞校准：先前写「顶栏导航隐藏」偏强，实测是**收起为 1 个条目**，已按实测改正。）
 
-**未覆盖、如实记录**：`≤680px` 的单列区间（`.condopt-param` 在该断点收单列）。
-真要补时建议**连同横向溢出一起测**——窄屏最常见的真缺陷是溢出而非重叠，
-`scrollWidth <= clientWidth + 1` 这条判据可直接复用（verifier 已同意届时用同一套判据复核）。
+**`≤680px` 单列区间：已由 lead 的 `_verify/viewport_matrix.py` 覆盖（2026-11-21，`9a44b54`）**，
+它把「横向溢出」和「断点是否真的命中」也做成了判据，2 主题 × 3 视口 × {默认态, 抽屉全开} = **10 格全过**：
+
+```
+主题  视口       状态       零尺寸 原始相交 真实重叠 横向溢出 exit  断点1024/680
+light 1344,896  默认/全开     0      0      0       0    0    False/False
+dark  1344,896  默认/全开     0      0      0       0    0    False/False
+light  900,800  默认/全开     0      0      0       0    0    True/False
+dark   900,800  默认/全开     0      0      0       0    0    True/False
+light  680,800  默认/全开     0      0      0       0    0    True/True
+```
+（`mq680=True` 证明断点真的生效、`scrollWidth-clientWidth=0` 证明无横向溢出 —— 即「窗口调小 ≠ 断点生效」
+这一点在两轮里都被单独量过。该脚本归 `_verify/**`，由 lead 维护，判定复用同一套三重判据。）
+
+> 出处澄清（避免后续引用失真）：这两列**是实测值，不是推断**。
+> `_verify/geom_probe.py` 在页面里量 `documentElement.scrollWidth/clientWidth` 与
+> `matchMedia('(max-width:1024px)')`、`matchMedia('(max-width:680px)')`（L175-178），并在输出里打印
+> （L343-348）；`viewport_matrix.py` 用正则解析这两行（`OVERFLOW_RE` / `BREAKPOINT_RE`）。
+> 我**独立重跑了** `py -3 _verify/viewport_matrix.py`，复现 lead 的表：**10/10 通过**，
+> 且 `light 680,800` 两态均为 `横向溢出 0` + `断点 1024/680 = True/True`。
+
+> 写临时 CDP 驱动时的坑（lead 在 `viewport_matrix.py` 上定位的）：**固定 `--remote-debugging-port` 连跑多次
+> 会与上一轮未释放的 Edge 抢端口**，表现为「拿不到 CDP 目标」的假失败。修法 = 每轮取空闲端口 +
+> 结束等端口释放 + 每轮独立 profile。本目录的临时驱动用随机端口 + `mkdtemp` profile，仍会偶发同类假失败
+> （随机不等于空闲），遇到时先分清「端口竞态」与「页面卡死」再下结论。
 
 截图：`_shots/geom_{light,dark}_{1344x896,900x800}.png`。
 
