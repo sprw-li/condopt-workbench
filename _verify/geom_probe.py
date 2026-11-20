@@ -33,6 +33,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -169,18 +170,56 @@ MEASURE_JS = r"""
                   layout_delta: after - before});
     }
   }
-  return JSON.stringify({boxes: out, pairs: pairs});
+  return JSON.stringify({boxes: out, pairs: pairs, metrics: {
+    innerW: window.innerWidth, innerH: window.innerHeight,
+    scrollW: document.documentElement.scrollWidth,
+    clientW: document.documentElement.clientWidth,
+    mq1024: window.matchMedia('(max-width:1024px)').matches,   // 窄屏断点是否真的生效
+    mq680: window.matchMedia('(max-width:680px)').matches,
+    shellDisplay: (() => { const el = document.querySelector('.workbench');
+                           return el ? getComputedStyle(el).display : null; })(),
+  }});
 })()
 """
 
 
-def cdp_measure(url: str, scenario_prefix: str | None, all_open: bool = False) -> dict:
-    port = 9341
-    profile = Path.home() / ".condopt-geom"
+def _free_port() -> int:
+    """取一个空闲端口：固定端口 + 连跑多次 = 上一轮 Edge 还没放开端口，下一轮就起不来
+    （实测表现为间歇性「拿不到 CDP 目标」、退出码 1）。"""
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+def _wait_port_closed(port: int, timeout: float = 10.0) -> None:
+    import socket
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        probe = socket.socket()
+        try:
+            probe.bind(("127.0.0.1", port))   # 能绑上 = 已释放
+            probe.close()
+            return
+        except OSError:
+            probe.close()
+            time.sleep(0.2)
+
+
+def cdp_measure(url: str, scenario_prefix: str | None, all_open: bool = False,
+                window_size: str = "1344,896", theme: str = "light") -> dict:
+    port = _free_port()
+    # 每次用**独立** profile：共用一个目录时，上一次 Edge 还没完全退出就会导致
+    # 下一次启动失败（实测表现为「拿不到 CDP 目标」、退出码 1；矩阵里会看成随机失败）。
+    profile = Path(tempfile.gettempdir()) / f"condopt-geom-{os.getpid()}-{int(time.time() * 1000) % 1000000}"
     proc = subprocess.Popen(
         [EDGE, "--headless=new", "--disable-gpu", "--no-first-run",
          f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
-         "--window-size=1344,896", url],
+         f"--window-size={window_size}", url],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
@@ -202,6 +241,17 @@ def cdp_measure(url: str, scenario_prefix: str | None, all_open: bool = False) -
 
         ws = websocket.create_connection(ws_url, timeout=40)
         time.sleep(3.0)
+        if theme == "dark":
+            # 上游主题走 localStorage + html[data-theme]；先写存储再设属性，避免闪白后再切
+            theme_js = ("(() => { try { localStorage.setItem('edukit-theme', 'dark'); } catch (e) {}"
+                        " document.documentElement.dataset.theme = 'dark';"
+                        " return document.documentElement.dataset.theme; })()")
+            ws.send(json.dumps({"id": 9, "method": "Runtime.evaluate",
+                                "params": {"expression": theme_js, "returnByValue": True}}))
+            for _ in range(40):
+                if json.loads(ws.recv()).get("id") == 9:
+                    break
+            time.sleep(0.6)
         if scenario_prefix:
             click_js = (
                 "(() => { const it = [...document.querySelectorAll('button,a')]"
@@ -243,6 +293,8 @@ def cdp_measure(url: str, scenario_prefix: str | None, all_open: bool = False) -
             proc.wait(timeout=10)
         except Exception:
             proc.kill()
+        shutil.rmtree(profile, ignore_errors=True)   # 独立 profile 用完即弃，避免占空间
+        _wait_port_closed(port)                      # 等端口真的释放，下一轮才不会竞争
 
 
 def main() -> int:
@@ -253,13 +305,17 @@ def main() -> int:
     parser.add_argument("--shots-dir", default=str(Path(__file__).resolve().parent / "shots"))
     parser.add_argument("--all-open", action="store_true",
                         help="先把所有 <details> 展开再测（覆盖「抽屉展开」态）")
+    parser.add_argument("--window-size", default="1344,896", help="形如 900,800")
+    parser.add_argument("--theme", choices=("light", "dark"), default="light")
     args = parser.parse_args()
 
-    data = cdp_measure(args.url, args.scenario or None, all_open=args.all_open)
-    boxes, pairs = data["boxes"], data["pairs"]
+    data = cdp_measure(args.url, args.scenario or None, all_open=args.all_open,
+                       window_size=args.window_size, theme=args.theme)
+    boxes, pairs, metrics = data["boxes"], data["pairs"], data.get("metrics", {})
 
     state = "抽屉展开态" if args.all_open else "默认态"
-    print(f"=== 几何判定（{state}，URL={args.url}，场景={args.scenario or '不切换'}）===")
+    print(f"=== 几何判定（{state}，{args.theme} @{args.window_size}，"
+          f"URL={args.url}，场景={args.scenario or '不切换'}）===")
     print(f"visible boxes（裁切+绘制过滤后）: {len(boxes)}")
     for b in sorted(boxes, key=lambda z: (z["y"], z["x"])):
         clip = "" if (b["vw"] >= b["w"] - 0.5 and b["vh"] >= b["h"] - 0.5) else \
@@ -283,9 +339,18 @@ def main() -> int:
 
     print("\n说明：判定三重缺一不可 —— ① 可滚动祖先裁切后的有效矩形 ② 跳过不绘制子树"
           "（含闭合 <details>）③ 重叠中心 elementsFromPoint 命中测试。")
+
+    # 窄屏最常见的真缺陷不是重叠而是**横向溢出**；顺带记录断点是否真的命中
+    overflow = (metrics.get("scrollW", 0) or 0) - (metrics.get("clientW", 0) or 0)
+    print(f"\n视口/断点：inner={metrics.get('innerW')}x{metrics.get('innerH')}  "
+          f"shell.display={metrics.get('shellDisplay')}  "
+          f"mq1024={metrics.get('mq1024')}  mq680={metrics.get('mq680')}")
+    print(f"横向溢出：scrollWidth={metrics.get('scrollW')} clientWidth={metrics.get('clientW')} "
+          f"→ 溢出 {overflow}px {'（OK）' if overflow <= 1 else '（溢出 > 1px，视为缺陷）'}")
+
     print(f"截图建议：py -3 -m http.server 托管后用 Edge --screenshot 目视复核（shots 目录：{args.shots_dir}）")
 
-    return 0 if (not real and not zero) else 2
+    return 0 if (not real and not zero and overflow <= 1) else 2
 
 
 if __name__ == "__main__":
