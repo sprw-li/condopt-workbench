@@ -1,11 +1,33 @@
-"""用 CDP 量真实 DOM 几何，判断 01 场景是否存在「元素相互重叠」。
+"""量真实 DOM 几何，判定「元素是否真的互相压住」。
 
-不靠眼看截图，直接取每个可见块的 getBoundingClientRect，两两求交面积，
-排除合法的包含关系（父容器包住子元素）。输出重叠对与面积。
+## 为什么需要三重判定（2026-11-21 修）
+
+第一版只看 `getBoundingClientRect()` 两两求交，结果**既误报又漏报**（verifier 在 task-16 §21.9 证明）：
+
+* **误报**：`getBoundingClientRect()` 返回的是**未裁切**矩形。元素在 `overflow:auto` 的父容器里
+  滚出可视区后矩形照旧，于是「压住别人」——其实用户根本看不到它。
+* **误报（第二类）**：收起的 `<details>` 子树在 Chromium 里只是 `content-visibility:hidden`，
+  矩形仍在，但**不绘制**。
+* **漏报**：只按「包含关系」排除父容器后，某些真实嵌套又会被漏掉。
+
+所以现在的判定是三条**缺一不可**：
+
+1. **裁切感知**：把每个矩形与它所有可滚动祖先的 client rect 求交，得到**有效可见矩形**；
+   有效矩形为空 = 滚出可视区 → 不是重叠。
+2. **绘制感知**：跳过 `hidden` / `display:none` / **闭合的 `<details>` 子树**（这些不绘制）。
+3. **命中测试**：对**有效**重叠，在重叠中心调 `document.elementsFromPoint()`，
+   要求两个元素里至少有一个真的出现在堆叠栈里（证明这个位置真的画着它）。
+   另外做一次**布局增量**对照：把较小的那个临时 `display:none`，看页面总高变化是否为 0
+   —— 为 0 说明它不参与布局（多为幻影），只作参考信息，不单独定案。
+
+用法：
+    py -3 _verify/geom_probe.py [--url URL] [--scenario 01] [--no-human-note]
+退出码：0 = 零尺寸 0 且真实重叠 0；2 = 有可疑项。
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -17,7 +39,6 @@ from pathlib import Path
 
 
 def _find_edge() -> str:
-    """Edge 路径按环境变量/常见位置探测，仓库里不写死本机盘符路径（发布去本机化）。"""
     override = os.environ.get("CONDOPT_EDGE")
     if override:
         return override
@@ -26,58 +47,140 @@ def _find_edge() -> str:
         return found
     for key in ("ProgramFiles", "ProgramFiles(x86)"):
         base = os.environ.get(key)
-        if not base:
-            continue
-        candidate = Path(base) / "Microsoft/Edge/Application/msedge.exe"
-        if candidate.is_file():
-            return str(candidate)
+        if base and (Path(base) / "Microsoft/Edge/Application/msedge.exe").is_file():
+            return str(Path(base) / "Microsoft/Edge/Application/msedge.exe")
     return "msedge"
 
 
 EDGE = _find_edge()
 
-JS = r"""
+#: 要纳入判定的关键块（可按需追加；**判定逻辑不要改**）
+SELECTORS = [
+    ".panel-body", ".field", "#input", ".field-head", ".attach-row", ".outputs",
+    "#condoptForm", "#condoptActions", ".run-row", "#runBtn", ".review",
+    "#condoptResult", ".condopt-form-fields",
+    "#condoptKickoff", "#condoptKickoffPlan", "#condoptAdvanced", ".condopt-advanced-body",
+    ".condopt-kickoff-head", ".condopt-chat-log", ".condopt-chat-input", ".condopt-chips",
+    ".condopt-bubble", ".condopt-chat-note", ".condopt-options", ".condopt-opt-card",
+    ".condopt-options-head", ".condopt-plan-head", ".condopt-plan-why", ".condopt-plan-warnings",
+    ".condopt-plan-build", "#condoptParamBasic", ".condopt-param-group", ".condopt-param",
+    ".condopt-advanced-params", ".condopt-advanced-params-body", ".condopt-run-semantics",
+]
+
+MEASURE_JS = r"""
 (() => {
-  const sel = [
-    '.panel-body', '.field', '#input', '.field-head', '.attach-row', '.outputs',
-    '#condoptForm', '#condoptActions', '.run-row', '#runBtn', '.review',
-    '#condoptResult', '.condopt-form-fields',
-    // §10 对话式开工新增的容器（web-shell 追加，判定逻辑未改）
-    '#condoptKickoff', '#condoptKickoffPlan', '#condoptAdvanced', '.condopt-advanced-body'
-  ];
+  const SEL = %s;
+
+  const visibleRect = (el) => {
+    let r = el.getBoundingClientRect();
+    let box = {x: r.x, y: r.y, w: r.width, h: r.height};
+    let p = el.parentElement;
+    while (p) {
+      const st = getComputedStyle(p);
+      if (/(auto|scroll|hidden)/.test(st.overflowY) || /(auto|scroll|hidden)/.test(st.overflowX)) {
+        const pr = p.getBoundingClientRect();
+        const nx = Math.max(box.x, pr.x), ny = Math.max(box.y, pr.y);
+        const rx = Math.min(box.x + box.w, pr.x + pr.width), ry = Math.min(box.y + box.h, pr.y + pr.height);
+        box = {x: nx, y: ny, w: Math.max(0, rx - nx), h: Math.max(0, ry - ny)};
+      }
+      p = p.parentElement;
+    }
+    return box;
+  };
+
+  const paintSkipped = (el) => {
+    if (el.hidden) return true;
+    let p = el;
+    while (p) {
+      const st = getComputedStyle(p);
+      if (st.display === 'none' || st.visibility === 'hidden') return true;
+      if (p.tagName === 'DETAILS' && !p.open) return true;   // 闭合抽屉：Chromium 只是 content-visibility:hidden
+      p = p.parentElement;
+    }
+    return false;
+  };
+
   const out = [];
   let idx = 0;
-  for (const s of sel) {
+  for (const s of SEL) {
     document.querySelectorAll(s).forEach((el, i) => {
-      if (el.hidden || el.closest('[hidden]')) return;   // 隐藏元素不参与几何判定
+      if (paintSkipped(el)) return;
       const r = el.getBoundingClientRect();
+      const vr = visibleRect(el);
       const st = getComputedStyle(el);
       el.dataset.__geomId = String(idx);
-      out.push({id: idx, sel: s + (i ? '[' + i + ']' : ''), x: r.x, y: r.y, w: r.width, h: r.height,
-                pos: st.position, vis: st.visibility, opacity: st.opacity, overflow: st.overflowY,
-                parent: el.parentElement && el.parentElement.dataset.__geomId ? Number(el.parentElement.dataset.__geomId) : -1});
-      // 记录祖先链，用于把「父容器包含子元素」排除掉
       const chain = [];
       let p = el.parentElement;
-      while (p) {
-        if (p.dataset.__geomId) chain.push(Number(p.dataset.__geomId));
-        p = p.parentElement;
-      }
-      out[out.length - 1].ancestors = chain;
+      while (p) { if (p.dataset.__geomId !== undefined) chain.push(Number(p.dataset.__geomId)); p = p.parentElement; }
+      out.push({
+        id: idx, sel: s + (i ? '[' + i + ']' : ''),
+        x: r.x, y: r.y, w: r.width, h: r.height,
+        vx: vr.x, vy: vr.y, vw: vr.w, vh: vr.h,          // 裁切后的有效可见矩形
+        pos: st.position, opacity: st.opacity,
+        parent: el.parentElement && el.parentElement.dataset.__geomId !== undefined
+                ? Number(el.parentElement.dataset.__geomId) : -1,
+        ancestors: chain,
+      });
       idx += 1;
     });
   }
-  return JSON.stringify(out);
+
+  const interArea = (a, b) => {
+    const x = Math.max(0, Math.min(a.vx + a.vw, b.vx + b.vw) - Math.max(a.vx, b.vx));
+    const y = Math.max(0, Math.min(a.vy + a.vh, b.vy + b.vh) - Math.max(a.vy, b.vy));
+    return {area: x * y, cx: Math.max(a.vx, b.vx) + x / 2, cy: Math.max(a.vy, b.vy) + y / 2};
+  };
+
+  // 命中测试装置：临时给元素打名字，方便从堆叠栈里认出它
+  const tag = (el, name) => { el.dataset.__hitName = name; return el; };
+  const byId = {};
+  for (const s of SEL) document.querySelectorAll(s).forEach((el) => {
+    if (el.dataset.__geomId !== undefined) byId[el.dataset.__geomId] = el;
+  });
+  for (const id of Object.keys(byId)) tag(byId[id], 'g' + id);
+
+  const pairs = [];
+  const ids = Object.keys(byId).map(Number);
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const a = out.find(o => o.id === ids[i]), b = out.find(o => o.id === ids[j]);
+      if (!a || !b) continue;
+      if (a.ancestors.includes(b.id) || b.ancestors.includes(a.id)) continue;   // 正常嵌套
+      const {area, cx, cy} = interArea(a, b);
+      if (area <= 0) continue;
+      const smaller = Math.min(a.vw * a.vh, b.vw * b.vh);
+      if (smaller <= 0) continue;
+      const ratio = area / smaller;
+      if (ratio > 0.92) continue;
+      // 命中测试：这个点上到底画着谁
+      const stack = document.elementsFromPoint(cx, cy)
+        .map(e => e.dataset && e.dataset.__hitName).filter(Boolean);
+      const inStack = stack.includes('g' + a.id) || stack.includes('g' + b.id);
+      // 布局增量：把小的临时隐藏，页面总高是否变化
+      const ea = byId[a.id], eb = byId[b.id];
+      const target = (a.vw * a.vh) <= (b.vw * b.vh) ? ea : eb;
+      const before = document.documentElement.scrollHeight;
+      const prev = target.style.display;
+      target.style.display = 'none';
+      const after = document.documentElement.scrollHeight;
+      target.style.display = prev;
+      pairs.push({ratio: Math.round(ratio * 1000) / 1000, a: a.sel, b: b.sel, area: Math.round(area),
+                  cx: Math.round(cx), cy: Math.round(cy), in_stack: inStack,
+                  layout_delta: after - before});
+    }
+  }
+  return JSON.stringify({boxes: out, pairs: pairs});
 })()
 """
 
 
-def main() -> int:
-    port = 9333
+def cdp_measure(url: str, scenario_prefix: str | None, all_open: bool = False) -> dict:
+    port = 9341
+    profile = Path.home() / ".condopt-geom"
     proc = subprocess.Popen(
         [EDGE, "--headless=new", "--disable-gpu", "--no-first-run",
-         f"--remote-debugging-port={port}", "--user-data-dir=" + str(Path.home() / ".condopt-geom"),
-         "--window-size=1344,896", "http://127.0.0.1:8770/?demo=kickoff"],
+         f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
+         "--window-size=1344,896", url],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
@@ -94,22 +197,46 @@ def main() -> int:
                 ws_url = pages[0]["webSocketDebuggerUrl"]
                 break
         if not ws_url:
-            print("FAIL: 拿不到 CDP 目标")
-            return 1
+            raise SystemExit("拿不到 CDP 目标")
         import websocket
 
-        ws = websocket.create_connection(ws_url, timeout=30)
+        ws = websocket.create_connection(ws_url, timeout=40)
         time.sleep(3.0)
-        ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
-                            "params": {"expression": JS, "returnByValue": True}}))
+        if scenario_prefix:
+            click_js = (
+                "(() => { const it = [...document.querySelectorAll('button,a')]"
+                f".find(e => e.textContent.includes({json.dumps(scenario_prefix)}));"
+                " if (it) { it.click(); return 'clicked'; } return 'not-found'; })()"
+            )
+            ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
+                                "params": {"expression": click_js, "returnByValue": True}}))
+            for _ in range(40):
+                if json.loads(ws.recv()).get("id") == 1:
+                    break
+            time.sleep(1.8)
+        if all_open:
+            # 把折叠容器全部展开再测：收起态会被 paintSkipped 跳过，展开态才验证得到它们
+            open_js = ("(() => { document.querySelectorAll('details').forEach(d => d.open = true);"
+                       " return document.querySelectorAll('details').length; })()")
+            ws.send(json.dumps({"id": 3, "method": "Runtime.evaluate",
+                                "params": {"expression": open_js, "returnByValue": True}}))
+            for _ in range(40):
+                if json.loads(ws.recv()).get("id") == 3:
+                    break
+            time.sleep(1.2)
+        ws.send(json.dumps({"id": 2, "method": "Runtime.evaluate",
+                            "params": {"expression": MEASURE_JS % json.dumps(SELECTORS),
+                                       "returnByValue": True}}))
         raw = None
-        for _ in range(50):
+        for _ in range(80):
             msg = json.loads(ws.recv())
-            if msg.get("id") == 1:
+            if msg.get("id") == 2:
                 raw = msg["result"]["result"]["value"]
                 break
         ws.close()
-        boxes = json.loads(raw)
+        if raw is None:
+            raise SystemExit("测量脚本没有返回")
+        return json.loads(raw)
     finally:
         proc.terminate()
         try:
@@ -117,47 +244,48 @@ def main() -> int:
         except Exception:
             proc.kill()
 
-    def area(b):
-        return b["w"] * b["h"]
 
-    def inter(a, b):
-        x = max(0, min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"]))
-        y = max(0, min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"]))
-        return x * y
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--url", default="http://127.0.0.1:8770/")
+    parser.add_argument("--scenario", default="开工建议",
+                        help="点这个侧栏项进入场景；传空字符串则不点")
+    parser.add_argument("--shots-dir", default=str(Path(__file__).resolve().parent / "shots"))
+    parser.add_argument("--all-open", action="store_true",
+                        help="先把所有 <details> 展开再测（覆盖「抽屉展开」态）")
+    args = parser.parse_args()
 
-    print(f"visible boxes: {len(boxes)}")
+    data = cdp_measure(args.url, args.scenario or None, all_open=args.all_open)
+    boxes, pairs = data["boxes"], data["pairs"]
+
+    state = "抽屉展开态" if args.all_open else "默认态"
+    print(f"=== 几何判定（{state}，URL={args.url}，场景={args.scenario or '不切换'}）===")
+    print(f"visible boxes（裁切+绘制过滤后）: {len(boxes)}")
     for b in sorted(boxes, key=lambda z: (z["y"], z["x"])):
-        print(f"  {b['sel']:<24} x={b['x']:7.1f} y={b['y']:7.1f} w={b['w']:7.1f} h={b['h']:7.1f} pos={b['pos']} op={b['opacity']}")
+        clip = "" if (b["vw"] >= b["w"] - 0.5 and b["vh"] >= b["h"] - 0.5) else \
+               f"  裁切后={b['vw']:.0f}x{b['vh']:.0f}"
+        print(f"  {b['sel']:<30} x={b['x']:7.1f} y={b['y']:7.1f} w={b['w']:7.1f} h={b['h']:7.1f}{clip}")
 
-    bad = []
-    zero_height = [b for b in boxes if b["h"] <= 1 or b["w"] <= 1]
-    for i in range(len(boxes)):
-        for j in range(i + 1, len(boxes)):
-            a, b = boxes[i], boxes[j]
-            # 祖先/后代互相包住是正常嵌套，不算重叠缺陷
-            if a["id"] in b.get("ancestors", []) or b["id"] in a.get("ancestors", []):
-                continue
-            if a["id"] == b.get("parent") or b["id"] == a.get("parent"):
-                continue
-            ov = inter(a, b)
-            if ov <= 0:
-                continue
-            smaller = min(area(a), area(b))
-            if smaller <= 0:
-                continue
-            ratio = ov / smaller
-            if ratio > 0.92:
-                continue
-            bad.append((round(ratio, 3), a["sel"], b["sel"], ov))
+    zero = [b for b in boxes if b["h"] <= 1 or b["w"] <= 1]
+    print(f"\n零尺寸（被压扁 → 子元素会溢出压住兄弟）: {len(zero)}")
+    for b in zero:
+        print(f"  ! {b['sel']:<30} w={b['w']:.1f} h={b['h']:.1f}")
 
-    print(f"\nzero-size boxes (被压扁的容器): {len(zero_height)}")
-    for b in zero_height:
-        print(f"  ! {b['sel']:<24} w={b['w']:.1f} h={b['h']:.1f} (子元素会溢出并压住后继兄弟)")
+    real = [p for p in pairs if p["in_stack"]]
+    phantom = [p for p in pairs if not p["in_stack"]]
+    print(f"\n原始相交对: {len(pairs)}   其中【真实】(命中测试可见): {len(real)}   【幻影】: {len(phantom)}")
+    for p in real:
+        print(f"  REAL   {p['ratio']:.2f}  {p['a']} x {p['b']}  area={p['area']}  "
+              f"@({p['cx']},{p['cy']})  布局增量={p['layout_delta']}")
+    for p in phantom:
+        print(f"  phantom {p['ratio']:.2f}  {p['a']} x {p['b']}  area={p['area']}  "
+              f"（命中栈里没有它；布局增量={p['layout_delta']}）")
 
-    print(f"\nsuspicious overlaps (ratio<=0.92): {len(bad)}")
-    for ratio, an, bn, ov in sorted(bad, reverse=True):
-        print(f"  {ratio:5.2f}  {an}  x  {bn}   area={ov:.0f}")
-    return 0 if (not bad and not zero_height) else 2
+    print("\n说明：判定三重缺一不可 —— ① 可滚动祖先裁切后的有效矩形 ② 跳过不绘制子树"
+          "（含闭合 <details>）③ 重叠中心 elementsFromPoint 命中测试。")
+    print(f"截图建议：py -3 -m http.server 托管后用 Edge --screenshot 目视复核（shots 目录：{args.shots_dir}）")
+
+    return 0 if (not real and not zero) else 2
 
 
 if __name__ == "__main__":
