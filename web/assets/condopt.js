@@ -339,7 +339,11 @@
   }
 
   function variableRowHtml(row, index) {
-    const keys = state.varKeys;
+    // §11.4：每行只渲染**该行实际拥有的键**（不是所有行的并集）。
+    // 并集渲染会给 categorical 行补出 low/high/unit、给 bool 行补出 low/high/... 等幻影控件，
+    // 实测真实模板：6 行并集 6 键 → 控件 45 个，而模板叶片字段只有 33 个（一一对应被破坏）。
+    // 新加的空白行（row 不存在）仍用并集，让用户能把任意键填出来。
+    const keys = (row && typeof row === "object") ? Object.keys(row) : state.varKeys;
     const fields = keys.map((key) => {
       const value = row ? row[key] : undefined;
       const path = "variables." + index + "." + key;

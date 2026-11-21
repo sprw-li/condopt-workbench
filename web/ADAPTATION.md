@@ -609,7 +609,104 @@ py -3 _verify\geom_probe.py
 > 同类的第二个抽屉 `.condopt-advanced-params`（参数页的高级参数）后来在 task-18 补了同款规则，
 > 见 §8.3；「幻影重叠 vs 真实重叠」的判据见 §8.4。
 
-## 10. 未决 / 需要注意
+## 10. 收尾补齐（CONTRACT §11，task-21）
+
+上一轮冻结时如实留的未覆盖项里，三项在 `web/**`：中文 IME、`?demo=` 与聊天首屏共存、旧表单逐字段。
+下面只记**改动 + 判据 + 原文结果**；判据由 api-backend 的 `_verify/v22_*.py` 与 verifier 独立复核。
+
+### 10.1 中文 IME：组合中间态绝不发送（改了 `assets/kickoff.js`）
+
+**改动**：聊天输入框加了组合态判定，三重保险（缺一不可）：
+1. `event.isComposing`（标准信号）；
+2. `compositionstart` / `compositionend` 维护的本地标志 —— **CDP 造的组合态与部分环境下
+   `isComposing` 取不到**，而且「点发送按钮」这条路径根本带不到键盘事件对象，只信 ① 会漏；
+3. `keyCode === 229`（真实输入法「用 Enter 确认候选」时发的就是它）。
+
+组合中按 Enter **不 `preventDefault`**（让输入法完成候选提交），等 `compositionend` 之后再按 Enter 才发送；
+`submitTyped()` 开头也拦一次组合态，所以「点发送按钮」同样不会把拼音发出去。
+
+**原文结果**（临时驱动 §11.5 自查，`ime 7/7`）：
+```
+组合态：输入框里是未确认的拼音            {"value":"shou"}
+★ 组合中按 Enter：零 /api/kickoff/chat 请求      delta=0
+★ 组合中点「发送」按钮：零请求                 delta=0
+组合中清空后按 Enter：零请求                  delta=0
+★ 提交后按 Enter：恰好发 1 次请求              delta=1
+请求体 content 是最终中文「收率」（不是拼音/空串）      ✓
+发送后输入框清空                          ✓
+```
+截图：`_shots/ime_1_composing.png`（输入框里是 `shou`、聊天区**没多出用户气泡**）、
+`_shots/ime_2_committed.png`。
+
+> 组合态用 CDP `Input.imeSetComposition` 造；**提交**用真实 `compositionend` 事件 + 最终文本，
+> 因为 CDP 没有「确认候选」的原语 —— 这一步是模拟，如实说明。
+
+### 10.2 `?demo=<key>` 与聊天首屏共存（**未改产品代码**）
+
+lead 说过：若判断「两者本就不该同时跑」要先报他，不许自行改语义。我先只做验证，结果是
+**共存本来就不互破**，所以我没有动任何语义（`app.js` 的 `run()` / `?demo=` 定时器一字未改）。
+
+**原文结果**（`demo 9/9`）：
+```
+加载 ?demo=kickoff 后 #condoptKickoff 仍存在且可见   {mount:true, mountVisible:true, bubbles:1}
+★ 聊天气泡数不为 0（演示流没清空聊天）              bubbles=1
+两条芯片后 step 已前进                           step=variables
+★ 已答轮次不丢：气泡数不减少                      5 → 5
+★ state.step 不回退                          variables → variables
+演示流没盖住左栏聊天（聊天仍可见）                     ✓
+演示输出落在右栏                              outInRight=true
+左栏聊天 × 右栏输出 几何重叠 = 0                    overlap=0
+全程零未捕获异常                              ✓
+```
+（触发「再跑一遍演示路径」用的是「开始处理」按钮 —— `?demo=` 的 520ms 定时器调的就是同一个 `run()`。）
+
+截图：`_shots/demo_1_before_demo.png`、`_shots/demo_2_coexist.png`。
+
+### 10.3 旧表单逐字段（改了 `assets/condopt.js`，**修掉一个真缺陷**）
+
+**缺陷**：`variableRowHtml()` 原来按「所有变量行的键并集」渲染每一行，于是
+categorical 行会多出 `low/high/unit`、bool 行会多出 `low/high/unit/choices` 等**幻影控件**：
+真实模板 6 行的并集是 6 个键 → 控件 **45** 个，而模板可编辑字段只有 **33** 个（一一对应被破坏）。
+改成**每行只渲染该行自己拥有的键**（新增的空白行仍用并集，让用户能把任意键填出来）。
+
+**口径说明（重要，独立验收脚本可能与我不同）**：「一个可编辑字段 = 一个控件」。
+`choices: ["MeCN","EtOH","water"]` 在表单里是**一个**逗号分隔输入框，所以算 **1** 个字段；
+若按标量递归拆开则会数成 35（把 3 个 choices 元素算 3 个字段）。我按前者实现：
+**控件 33 == 字段 33**，每行控件数 `5,5,5,3,4,2`。
+
+**原文结果**（`oldform 10/10`）：
+```
+★ 控件数 == prepare_template 字段数（一个可编辑字段一个控件）  控件=33 字段=33（标量递归口径为 35）
+每个变量行只渲染该行自己的键（无并集幻影控件）              每行控件=5,5,5,3,4,2
+★ 逐字段改值：answers 里逐字段等于所改值                （33 个控件逐个改，全等）
+★ 类型保持（bool→bool / num→num / list→list / str→str） ✓
+逐字段都真实改到了（无跳过）                        共 33 个控件
+★ 未触碰字段不影响：键集与模板一致                    多出= 缺少=
+空值没有被写成 "None" 字符串                        ✓
+清空某字段后该键被移除（不是写成 None / null）           ✓
+控件数在编辑后不变（无幻影增长）                       ✓
+```
+截图：`_shots/oldform_fields.png`（抽屉打开：objective 2 个字段；#1~#6 行各自 5/5/5/3/4/2 个控件）。
+
+> 驱动里踩过的一个坑（记录备查）：每次改动都会走
+> `serializeModel → #input → syncFormFromJson → renderForm`，**表单被重绘**，
+> 所以缓存控件节点会拿到游离节点、后续字段「改不动」；必须按 path 每轮重新查询。
+
+### 10.4 临时驱动的资源卫生（§11.5）
+
+自查驱动（跑完即删，不入库）遵守 §11.5：
+1. profile 建在 `%TEMP%`，名字含 pid + 时间戳：`condopt-v22-<pid>-<ts>-<rand>`；
+2. 结束 `taskkill /T /F` 杀整棵进程树；**若仍有 Edge 子进程抱着 profile（实测 SQLite 文件 `EBUSY`），
+   再按「命令行里含本 profile 路径」精确定向补杀**（绝不用 `/IM msedge.exe`，那会连用户浏览器一起杀）；
+3. 删除后**连续两次**确认不存在（settle 窗口内被写回就继续删），删不掉打到 stderr；
+4. 自证「跑完新增残留 == 0」：起点/终点各数一次 `%TEMP%\condopt-v22-*`，且要求 `profile` 已消失。
+   实测三个模式都是 `起点残留=0 终点残留=0 新增残留=0 profile 仍存在=false`。
+5. 浏览器用 `--remote-debugging-port=0`（端口写进 `DevToolsActivePort`），避开固定端口的竞态假失败（§21.15）。
+
+> 如实记录两处：① 我第一版把「起点残留」数在**创建自己 profile 之后**，自证成 `-1`（已改成先数后建）；
+> ② `taskkill /T /F` 会对已经退出的 Edge 子进程报 `exit 128 / not supported / no running instance` ——
+> 这些**照 §11.5-4 打到 stderr 不吞**，但当轮真实判据（profile 已删 + 新增残留 0）仍然成立。
+## 11. 未决 / 需要注意
 
 **task-9 的 4 个未决问题已由 lead 裁定并写进契约（2026-11-20 14:05），前端已对齐：**
 

@@ -171,6 +171,22 @@
     toast._t = setTimeout(() => box.classList.remove("is-on"), 3200);
   }
 
+  // §11.1 中文 IME：**组合中间态（拼音未确认）绝不能被当成答案发出去**。
+  // 三重保险，缺一不可：
+  //   ① `event.isComposing`（标准信号：为 true 表示这次按键属于组合过程）；
+  //   ② `compositionstart` / `compositionend` 维护的本地状态 —— **CDP 造的组合态与部分浏览器
+  //      驱动下 `isComposing` 可能缺失**，只信 event.isComposing 会漏；而且点击发送按钮、
+  //      或在组合中触发别的路径时，事件对象根本带不到这个信息；
+  //   ③ `keyCode === 229`：真实输入法在「用 Enter 确认候选」时发的就是这个（此时 keydown
+  //      不代表用户想提交表单）。
+  let composing = false;
+
+  function isComposing(event) {
+    if (composing) return true;
+    if (!event) return false;
+    return Boolean(event.isComposing) || event.keyCode === 229;
+  }
+
   function refreshIcons() {
     if (window.lucide && typeof window.lucide.createIcons === "function") {
       try { window.lucide.createIcons(); } catch (error) { /* 图标不阻塞 */ }
@@ -367,17 +383,28 @@
       }
       if (event.target.closest("#condoptChatSend")) { submitTyped(); }
     });
+    box.addEventListener("compositionstart", (event) => {
+      if (event.target && event.target.id === "condoptChatText") composing = true;
+    });
+    box.addEventListener("compositionend", (event) => {
+      if (event.target && event.target.id === "condoptChatText") composing = false;
+    });
     box.addEventListener("keydown", (event) => {
-      if (event.target && event.target.id === "condoptChatText" && event.key === "Enter") {
-        event.preventDefault();
-        submitTyped();
-      }
+      if (!event.target || event.target.id !== "condoptChatText") return;
+      if (event.key !== "Enter") return;
+      // 组合中按 Enter = 输入法「确认候选」，不是「发送」。这里**不要** preventDefault，
+      // 让输入法完成提交；等 compositionend 之后用户再按 Enter 才发送。
+      if (isComposing(event)) return;
+      event.preventDefault();
+      submitTyped();
     });
   }
 
   function submitTyped() {
     const input = $("condoptChatText");
     if (!input) return;
+    // §11.1：组合中间态一律不发（点「发送」按钮同样拦：组合内容不是答案）
+    if (isComposing(null)) return;
     const text = String(input.value || "").trim();
     if (!text) { toast("先打一句话，或点上面的选项"); return; }
     input.value = "";
