@@ -38,6 +38,9 @@ import time
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import browser_profile  # noqa: E402  §11.5-7：卫生实现只允许一份（profile/端口/树杀/清理/串行锁）
+
 
 def _find_edge() -> str:
     override = os.environ.get("CONDOPT_EDGE")
@@ -184,15 +187,12 @@ MEASURE_JS = r"""
 
 
 def _free_port() -> int:
-    """取一个空闲端口：固定端口 + 连跑多次 = 上一轮 Edge 还没放开端口，下一轮就起不来
-    （实测表现为间歇性「拿不到 CDP 目标」、退出码 1）。"""
-    import socket
+    """取空闲端口。
 
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
+    固定端口 + 连跑多次 = 上一轮 Edge 还没放开端口，下一轮就起不来（实测表现为间歇性
+    「拿不到 CDP 目标」、退出码 1）。实现统一走 ``browser_profile``（§11.5-7：卫生实现只允许一份）。
+    """
+    return browser_profile.free_port()
 
 
 def _wait_port_closed(port: int, timeout: float = 10.0) -> None:
@@ -211,42 +211,25 @@ def _wait_port_closed(port: int, timeout: float = 10.0) -> None:
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
-    """结束 Edge **整棵进程树**：terminate 只杀主进程，子进程仍可能占着 profile 文件。"""
-    if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    proc.terminate()
-    try:
-        proc.wait(timeout=10)
-    except Exception:
-        proc.kill()
+    """结束 Edge **整棵进程树**（实现统一在 browser_profile）。
 
-
-def _cleanup_profile(profile: Path, settle: float = 12.0) -> None:
-    """删临时 profile，并**确认它不会自己长回来**。
-
-    踩过两次坑，记在这里：
-      1. 最早用 `shutil.rmtree(..., ignore_errors=True)` —— 删失败被吞掉，%TEMP% 攒了 16 个目录；
-      2. 改成「重试删除」后仍然漏：Edge 的子进程会在主进程被杀之后继续收尾，
-         **把刚删掉的 profile 又写回来**（残留约半份文件、`warn` 却不响，因为删的瞬间它确实不存在）。
-    所以判据必须是「删除后**连续两次确认不存在**」；`settle` 秒内还长回来就继续删，最后仍存在则报错。
+    教训链：terminate 只杀主进程 → 子进程仍占着 profile 文件；更隐蔽的是**父进程先死**之后，
+    `taskkill /T /PID <已死的父>` 再也走不到子进程 → 子进程脱管、目录删不掉（队友实测出
+    61 个孤儿 msedge、689 个残留条目）。所以必须**父还活着时先树杀**，再按 profile 反查持有者。
     """
-    deadline = time.time() + settle
-    clean_streak = 0
-    while time.time() < deadline:
-        if profile.exists():
-            shutil.rmtree(profile, ignore_errors=True)
-            clean_streak = 0
-        else:
-            clean_streak += 1
-            if clean_streak >= 2:          # 连续两次都没有 = 子进程已不再回写
-                return
-        time.sleep(0.6)
-    if profile.exists():
-        print(f"[warn] 临时 profile 删除失败（子进程仍在回写？），需手工清理：{profile}",
-              file=sys.stderr)
-    else:
-        print(f"[warn] 临时 profile 在 {settle:.0f}s 内才稳定删除：{profile}", file=sys.stderr)
+    browser_profile.kill_tree(proc)
+
+
+def _cleanup_profile(profile: Path) -> None:
+    """删临时 profile，并确认它不会自己长回来（实现统一在 browser_profile）。
+
+    这里踩过两次：① `rmtree(ignore_errors=True)` 把删除失败吞掉；② 改成重试后仍漏——
+    Edge 子进程在父进程被杀之后继续收尾、**把刚删掉的目录又写回来**，删除的瞬间它确实不存在，
+    所以任何「删完检查一次」的判据都会误判成功。判据必须是「连续两次确认不存在」。
+    """
+    browser_profile.kill_profile_holders(profile)
+    if not browser_profile.cleanup(profile):
+        print(f"[warn] 临时 profile 删除失败，需手工清理：{profile}", file=sys.stderr)
 
 
 def cdp_measure(url: str, scenario_prefix: str | None, all_open: bool = False,
@@ -254,13 +237,14 @@ def cdp_measure(url: str, scenario_prefix: str | None, all_open: bool = False,
     port = _free_port()
     # 每次用**独立** profile：共用一个目录时，上一次 Edge 还没完全退出就会导致
     # 下一次启动失败（实测表现为「拿不到 CDP 目标」、退出码 1；矩阵里会看成随机失败）。
-    profile = Path(tempfile.gettempdir()) / f"condopt-geom-{os.getpid()}-{int(time.time() * 1000) % 1000000}"
+    profile = browser_profile.make_profile("geom")
     proc = subprocess.Popen(
         [EDGE, "--headless=new", "--disable-gpu", "--no-first-run",
          f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
          f"--window-size={window_size}", url],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    browser_profile.attach(profile, proc)
     try:
         ws_url = None
         for _ in range(60):
@@ -389,4 +373,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # §11.5-8：所有浏览器驱动入口必须取串行锁；拿不到锁 → exit 4（环境/并发类），
+    # 不记成产品缺陷、不静默重试。
+    sys.exit(browser_profile.run_guarded(main, "geom"))

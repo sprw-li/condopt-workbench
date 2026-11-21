@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import LOGS, Report, Server, fresh, log  # noqa: E402
+import browser_profile as bp  # §11.5 临时资源卫生（profile 不残留 + 动态端口）
 
 def _find_edge() -> str:
     """Edge 路径按环境变量/常见位置探测（仓库里不写死本机盘符路径；与 geom_probe.py 同口径）。"""
@@ -209,6 +210,7 @@ def start_edge(port: int, profile: Path) -> subprocess.Popen:
          "--window-size=1344,896", "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    bp.attach(profile, proc)          # §11.5：登记进程，退出时 taskkill /T /F 树杀 + 删 profile
     deadline = time.time() + 60
     while time.time() < deadline:
         try:
@@ -261,9 +263,9 @@ PAIR_JS = r"""
 def main() -> int:
     report = Report("task-16 A2/A3 · kickoff 四状态几何")
     runs = fresh("geom")
-    profile = Path(tempfile.mkdtemp(prefix="dsh-geom-"))
-    # 端口用随机，避开 lead 占用的 8770
-    debug_port = 9450
+    profile = bp.make_profile("states")        # §11.5：%TEMP% + pid/时间戳，退出自动清理
+    # 端口用随机，避开 lead 占用的 8770；每次取空闲端口也消除固定端口竞态（§21.15 更正 2）
+    debug_port = bp.free_port()
     proc = start_edge(debug_port, profile)
     try:
         with Server(runs) as server:
@@ -468,13 +470,9 @@ def main() -> int:
             )
             cdp.close()
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except Exception:  # noqa: BLE001
-            proc.kill()
+        bp.kill_tree(proc)   # §11.5：父还活着时树杀（先 terminate 会让子进程脱管）
     return report.finish("v21_geom_states.log")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(bp.run_guarded(main, "states"))

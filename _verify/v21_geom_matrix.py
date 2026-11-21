@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import browser_profile as bp  # §11.5 临时资源卫生（profile 不残留 + 动态端口）
 from common import Report, SHOTS, Server, fresh, log  # noqa: E402
 
 import geom_probe as LP  # lead 的判定代码
@@ -87,6 +88,7 @@ def start_edge(port: int, profile: Path, width: int, height: int):
          f"--window-size={width},{height}", "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    bp.attach(profile, proc)          # §11.5：登记进程，退出时 taskkill /T /F 树杀 + 删 profile
     import time
     import urllib.request
     deadline = time.time() + 60
@@ -102,14 +104,13 @@ def start_edge(port: int, profile: Path, width: int, height: int):
 def main() -> int:
     report = Report("几何矩阵：主题 × 视口 × 状态（独立复核 web-shell 的补测）")
     runs = fresh("matrix")
-    port = 9460
     with Server(runs) as server:
         for theme, viewport, width, height in CONFIGS:
-            profile = Path.home() / f".condopt-matrix-{theme}-{viewport}"
+            port = bp.free_port()                      # §11.5：动态端口，避免固定端口竞态
+            profile = bp.make_profile(f"matrix-{theme}-{viewport}")
             proc = start_edge(port, profile, width, height)
-            port += 1
             try:
-                cdp = G.CDP(G.new_target(port - 1))
+                cdp = G.CDP(G.new_target(port))
                 cdp.url = f"{server.base}/"
                 cdp.call("Page.enable")
                 cdp.call("Runtime.enable")
@@ -139,13 +140,9 @@ def main() -> int:
                         path.write_bytes(base64.b64decode(shot["data"]))
                 cdp.close()
             finally:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=10)
-                except Exception:  # noqa: BLE001
-                    proc.kill()
+                bp.kill_tree(proc)   # §11.5：父还活着时树杀（先 terminate 会让子进程脱管）
     return report.finish("v21_geom_matrix.log")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(bp.run_guarded(main, "matrix"))

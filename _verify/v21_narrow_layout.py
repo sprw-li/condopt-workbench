@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import browser_profile as bp  # §11.5 临时资源卫生（profile 不残留 + 动态端口）
 from common import Report, Server, fresh, log  # noqa: E402
 
 import v21_geom_matrix as M  # 复用它的 Edge 启动与导航
@@ -47,11 +48,11 @@ PROBE = r"""
 def main() -> int:
     report = Report("窄屏断言核实：900x800 是否真的进堆叠布局")
     runs = fresh("narrow")
-    port = 9470
     with Server(runs) as server:
         results = {}
         for label, w, h in (("desktop 1344x896", 1344, 896), ("narrow 900x800", 900, 800)):
-            proc = M.start_edge(port, Path.home() / f".condopt-narrow-{w}", w, h)
+            port = bp.free_port()                      # §11.5：动态端口，避免固定端口竞态
+            proc = M.start_edge(port, bp.make_profile(f"narrow-{w}"), w, h)
             try:
                 cdp = M.G.CDP(M.G.new_target(port))
                 cdp.url = f"{server.base}/"
@@ -63,12 +64,7 @@ def main() -> int:
                 log(f"\n{label}: {json.dumps(data, ensure_ascii=False)}")
                 cdp.close()
             finally:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=10)
-                except Exception:  # noqa: BLE001
-                    proc.kill()
-            port += 1
+                bp.kill_tree(proc)   # §11.5：父还活着时树杀（先 terminate 会让子进程脱管）
 
         d, n = results["desktop 1344x896"], results["narrow 900x800"]
         report.check(
@@ -104,4 +100,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(bp.run_guarded(main, "narrow"))

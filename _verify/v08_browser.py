@@ -26,6 +26,7 @@ from pathlib import Path
 import websocket  # websocket-client
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import browser_profile as bp  # §11.5 临时资源卫生（profile 不残留 + 串行锁）
 from common import (  # noqa: E402
     REPO, SHOTS, Report, Server, WORKBENCH, action, ask, free_port, fresh, get, init_study, js, log,
 )
@@ -285,7 +286,7 @@ def main() -> int:
         )
         backend_url = f"{backend.base}/"
 
-        profile = Path(tempfile.mkdtemp(prefix="dsh-edge-"))
+        profile = bp.make_profile("v08browser")
         edge = start_edge(debug_port, profile)
         try:
             log(f"Edge headless pid={edge.pid} devtools=127.0.0.1:{debug_port}")
@@ -393,11 +394,11 @@ def main() -> int:
             try:
                 edge.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                edge.kill()
+                bp.kill_tree(edge)
             static.terminate()
 
     return report.finish("v08_browser.log")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(bp.run_guarded(main, "v08browser"))

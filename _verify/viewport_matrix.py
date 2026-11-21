@@ -155,4 +155,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # 本脚本是「套件」：连续调用多个浏览器驱动。§11.5-8 要求套件也取**套件级锁**，
+    # 否则两个套件运行器交错时会出现「驱动级锁防不住」的同类冲突（实测：Page.enable 超时）。
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import browser_profile  # noqa: E402
+
+    sys.exit(browser_profile.suite_guard(main, "viewport_matrix"))

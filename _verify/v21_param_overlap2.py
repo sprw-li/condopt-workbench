@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import browser_profile as bp  # §11.5 临时资源卫生（profile 不残留 + 动态端口）
 from common import Report, SHOTS, Server, fresh, log  # noqa: E402
 
 import v21_geom_states as G  # noqa: E402
@@ -68,10 +69,11 @@ PROBE = r"""
 def main() -> int:
     report = Report("确认与定级：参数页底部遮挡")
     runs = fresh("paramoverlap2")
-    proc = G.start_edge(9453, Path.home() / ".condopt-paramoverlap2")
+    port = bp.free_port()          # §11.5：动态端口，避免固定端口竞态
+    proc = G.start_edge(port, bp.make_profile("paramoverlap2"))
     try:
         with Server(runs) as server:
-            cdp = G.CDP(G.new_target(9453))
+            cdp = G.CDP(G.new_target(port))
             cdp.call("Page.enable")
             cdp.call("Runtime.enable")
             cdp.call("Page.navigate", {"url": f"{server.base}/"})
@@ -118,9 +120,12 @@ def main() -> int:
                 f"param 包含 build={data['param_is_ancestor_of_build']}",
             )
             report.check(
-                "滚到底时最后一条参数与 build 块**确实重叠**（两者均可见）",
-                bool(data.get("overlap")) and data["overlap"]["w"] > 0 and data["overlap"]["h"] > 0,
-                f"overlap={data.get('overlap')} center_topmost={data.get('overlap_center_topmost')}",
+                "**修复后应成立**：滚到底时最后一条参数与 build 块**不再重叠**"
+                "（F10/task-18 给 `.condopt-advanced-params` 补了 `:not([open])>body{display:none}` 后，"
+                "原先 41,566 px² 的幻影相交已消失）",
+                not data.get("overlap"),
+                f"overlap={data.get('overlap')} center_topmost={data.get('overlap_center_topmost')}"
+                f"（修复前此断言期望「确实重叠」，是当时的定级口径）",
             )
             blocked = [h for h in data["controls_in_target"] if h.get("clickable") is False]
             report.check(
@@ -130,13 +135,9 @@ def main() -> int:
             )
             cdp.close()
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except Exception:  # noqa: BLE001
-            proc.kill()
+        bp.kill_tree(proc)   # §11.5：父还活着时树杀（先 terminate 会让子进程脱管）
     return report.finish("v21_param_overlap2.log")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(bp.run_guarded(main, "paramoverlap2"))

@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import browser_profile as bp  # §11.5 临时资源卫生（profile 不残留 + 动态端口）
 from common import Report, Server, fresh, get, js, log  # noqa: E402
 
 import geom_probe as LP  # lead 的新版探针：复用它的 MEASURE_JS / SELECTORS
@@ -61,10 +62,11 @@ def set_advanced_param(cdp, name: str, value: str) -> bool:
 def main() -> int:
     report = Report("交叉对照：lead 判据 × 我的状态 + F10 副作用")
     runs = fresh("crosscheck")
-    proc = G.start_edge(9457, Path.home() / ".condopt-crosscheck")
+    port = bp.free_port()          # §11.5：动态端口，避免固定端口竞态
+    proc = G.start_edge(port, bp.make_profile("crosscheck"))
     try:
         with Server(runs) as server:
-            cdp = G.CDP(G.new_target(9457))
+            cdp = G.CDP(G.new_target(port))
             cdp.call("Page.enable")
             cdp.call("Runtime.enable")
             cdp.call("Page.navigate", {"url": f"{server.base}/"})
@@ -159,13 +161,9 @@ def main() -> int:
             )
             cdp.close()
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except Exception:  # noqa: BLE001
-            proc.kill()
+        bp.kill_tree(proc)   # §11.5：父还活着时树杀（先 terminate 会让子进程脱管）
     return report.finish("v21_crosscheck.log")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(bp.run_guarded(main, "crosscheck"))

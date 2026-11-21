@@ -1932,3 +1932,110 @@ lead 的修复成本身要求「跑完新增残留数 == 0」而不是「没报�
 `_verify\logs\{freeze2_vm.txt, freeze2_myrunner.txt, freeze2_v21_kickoff.txt,
 freeze2_v21_frontend_kickoff.txt, freeze2_v21_f11_guard.txt, freeze2_v21_narrow_layout.txt}`。
 其 8788 服务已停止；**8770 上 lead 的服务未受影响（仍 HTTP 200）**。
+
+
+---
+
+## 22. 收尾补齐独立验收（CONTRACT §11）
+
+> 冻结点口径：代码 `ec73626`（PASS）/ 文档 `59742ed`；本轮新增提交见 §22.9。按 §11.5-7，
+> 每条结论都注明**提交哈希 + 是否并发 + 是否在某次清扫之后**。
+
+### 22.A §11.5 验收脚本自身的临时资源卫生（task-22 A 段，已完成）
+
+#### 22.A.1 起因：我自己用同一把尺子量到自己在漏
+
+上一轮（§21.17）我用「同一把尺子」量到 **lead 的探针已归零、而我自己的浏览器驱动仍在漏**：
+`v21_frontend_kickoff.py`(.condopt-fe)、`v21_narrow_layout.py`(.condopt-narrow-*) 等把一次性
+profile 建在 `Path.home()/.condopt-*`，**不删也不重试**。当时我**刻意没有顺手改**这些已提交脚本
+（否则「按提交版本」的证据会被我自己的改动污染）。本轮 §11.5 正式排期，作为**独立提交**收口。
+
+#### 22.A.2 改了什么
+
+新增 `_verify/browser_profile.py`（卫生与串行基础设施）+ `_verify/run_browser_suite.py`（串行套件运行器）
++ `_verify/check_driver_entrypoints.py`（§11.5-8 机器检查）；把 **10 个 v21 驱动 + 遗留的 `v08_browser.py`**
+全部改为：
+
+| §11.5 要求 | 实现 |
+|---|---|
+| ① profile 建 `%TEMP%`、名字含 pid+时间戳 | `bp.make_profile(tag)` → `%TEMP%\condopt-verify-<tag>-<pid>-<stamp>` |
+| ② 结束 `taskkill /T /F` 杀**整棵进程树** | `bp.kill_tree(proc)`：**在父进程还活着时**调用（`taskkill /T` 才能遍历子树） |
+| ③ 删除后**连续两次确认不存在** | `bp.cleanup()`：`rmtree` → settle → 再确认；被写回则重试 |
+| ④ 删不掉打 **stderr**，不许 `ignore_errors=True` | `cleanup` 全程不吞异常，失败返回 `False` 并打 stderr |
+| ⑤ 脚本自证「跑完新增残留 == 0」（跨 settle **多次**计数） | `bp.guard_residue()`：三次采样取峰值，判「**本进程**新增」 |
+
+另按 §11.5-6 增加**串行锁**（`run_guarded` / `suite_guard`）与 **exit 4 环境/并发类退出码**。
+
+#### 22.A.3 过程中修掉的四个真问题（都不是靠看代码看出来的，是跑出来的）
+
+1. **父进程先死 → 子进程脱管 → profile 删不掉**（最严重）
+   原收尾是 `proc.terminate()` → `wait` → `kill`。Edge 会派生 renderer/GPU/utility 等**多个子进程**；
+   父进程一死，子进程被 reparent，此时 `taskkill /T /PID <已死的父>` **再也走不到它们**，它们继续
+   持有 profile。实测：10 个驱动里 2 个自证残留 != 0，系统里躺着 **61 个孤儿 msedge**，遗留目录
+   **689 个条目**。修法：收尾**先 `bp.kill_tree(proc)`（父还活着时树杀）**，再由 `cleanup()`
+   **按 profile 反查持有者**（`pids_using`）清掉残余，然后删除 + 连续两次确认。
+2. **判据把别人的在途 profile 算成我的**（`api-backend` 并发跑 `v22_oldform_fields.py` 时实测）
+   `guard_residue` 原本统计**全局**同前缀目录 → 把对方正在用的 `condopt-verify-oldform-*` 记成我的新增残留。
+   修法：判据改 **pid 作用域**（只算含本进程 pid 的目录），全局数只作信息行。
+3. **`guard_residue` 不取串行锁且不报警**（`api-backend` 实测证伪了我的假设，这是本轮第 9 个同族问题）
+   我原以为「复用我的模块就自动获得串行」，实际**锁是 opt-in**：只有 `run_guarded` 会取锁。
+   对方两个驱动用 `guard_residue(main)` 做入口，于是**并发跑却都 exit 0**——契约对存量脚本**假生效**。
+   修法：`guard_residue` 在**无串行保护**时**大声警告**（并加自检第 11 条：无锁必须警告、持锁不得刷噪音）；
+   所有入口一律改用 `run_guarded`。
+4. **我自己把并发纪律破坏了**：我在后台跑 10 驱动套件时又在前台跑了一个驱动 → `Page.enable` 超时。
+   这暴露了「驱动级锁只防两个驱动重叠，两个**套件运行器**仍会在驱动间隙交错」。修法：新增
+   **套件级锁** `suite_guard`（整个套件期间持锁，套件内部驱动不再互相抢锁）。
+
+#### 22.A.4 §11.5-8 机器检查（带负对照）
+
+`_verify/check_driver_entrypoints.py`：扫描 `_verify/**`，判定「是浏览器驱动 且 未取串行锁」→ 红。
+
+- **负对照 `--self-test`（4/4 通过）**：造 4 个样本文件，断言
+  ① 合规驱动（`run_guarded`）不算违规；② **裸入口驱动必须被判违规**；③ **`guard_residue` 入口驱动必须被判违规**（假生效那类）；④ 引用卫生模块但不是驱动 → 不算违规。
+- **检查器自身也修了两次**（都是「跑出来」的）：
+  * **假阳**：`_migrate_*.py` 把 `--user-data-dir=…` / `start_edge(…)` 写在**替换字符串**里，被当成驱动；
+  * **假阴**：只要求 `subprocess.Popen` 会漏掉「自己不起进程、而是调 `start_edge()`」的 **8 个驱动**。
+  * 修法：改用 **AST 取真实被调用的函数名**（`Popen` / `start_edge` / `CDP`），两边都能分清。
+- **真实扫描结果**：`39 个文件 → 浏览器驱动 14 个，取锁 13 个`；**唯一红项是 `geom_probe.py`**（lead 的文件，非我写作域）→ 已上报。
+
+#### 22.A.5 验收结果
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 卫生模块自检（含对抗样本） | `py -3 _verify/browser_profile.py --self-test` | **11/11** |
+| 入口机器检查负对照 | `py -3 _verify/check_driver_entrypoints.py --self-test` | **4/4** |
+| 入口机器检查（真实） | `py -3 _verify/check_driver_entrypoints.py` | 13/14 取锁；**1 红=`geom_probe.py`**（lead 域） |
+| **串行套件（10 个驱动）** | `py -3 _verify/run_browser_suite.py` | **10/10，exit 0**；每个驱动**本进程新增残留 0**；全程**同前缀全局 = 0** |
+| 全量回归 | `py -3 -m pytest -o addopts="" -q` | **114 passed** |
+| 起服务自检 | `py -3 server.py --port 0 --selftest` | **9/9** |
+| lead 的矩阵 | `py -3 _verify/viewport_matrix.py` | **10/10** |
+| lead 的解析自检 | `py -3 _verify/viewport_matrix.py --self-test` | **6/6** |
+| 收尾残留 | 目录 / 孤儿 Edge / 锁文件 | **0 / 0 / 不存在** |
+
+**串行套件原文（本次为「安静机器」运行：无其他驱动、无锁、起始残留 0）**
+```
+geom_states   exit=0  12/12 PASS   [卫生] 本进程 before=0 after=0；同前缀全局=0
+narrow_layout exit=0   4/4 PASS    [卫生] 本进程 before=0 after=0；同前缀全局=0
+advparams_space exit=0 3/3 PASS    …
+advanced_params_overlap exit=0 4/4 PASS
+param_overlap exit=0   2/2 PASS
+param_overlap2 exit=0  3/3 PASS
+geom_diag     exit=0   3/3 PASS
+crosscheck    exit=0   7/7 PASS
+frontend_kickoff exit=0 10/10 PASS
+geom_matrix   exit=0  16/16 PASS
+通过 10/10；判据FAIL(2)=无；卫生失败(3)=无；环境/并发(4)=无；其他=无
+```
+
+**并发行为实测（§11.5-6 的正向验证）**：A 持锁时 B 立即判环境/并发类：
+```
+[并发] 已有驱动在跑：pid=105096 tag=narrow since=10:29:51；同前缀 profile 0 个（[]）
+        → 按 CONTRACT §11.5-6 判为**环境/并发类失败**（exit 4），不得记为产品缺陷；请串行重跑。
+B(geom_diag) EXIT=4     A(narrow_layout) EXIT=0（4/4 PASS，残留 0）
+```
+
+#### 22.A.6 结论与口径
+
+- **A 段（§11.5 收口 + §11.5-8 机器检查）PASS**；提交哈希取决于 lead 的本轮提交（见 §22.9）。
+- 上述结果是**工作树**运行；按冻结流程，**最终验收须在全新克隆上按提交哈希复跑**（§22.B 会照此执行）。
+- **并发状态：安静机器（无其他驱动、无锁、起始残留 0）**；此前一轮同样 10/10 但**有并发**（信息行显示同前缀全局 1–2），已按 §11.5-7 区分记录。
