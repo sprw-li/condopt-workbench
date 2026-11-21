@@ -178,6 +178,16 @@ MAX_IMPORT_SAMPLE_ROWS = 50
 DEFAULT_LLM_BASE_URL = "https://open.bohrium.com/openapi/model-gateway/v1"
 DEFAULT_LLM_API_KEY_ENV = "BOHRIUM_API_KEY"
 DEFAULT_LLM_MODEL = "qwen3.8-27b"
+#: §11.3 润色通道：只发「本轮草稿 + 候选算法名」，绝不发 answers / run 内容。
+POLISH_SYSTEM_PROMPT = (
+    "你是实验条件优化工作台的助手。把你收到的 draft 改写成更自然、更口语化的中文，"
+    "保持事实、数字与算法名不变，不增删信息，不加标题，"
+    "只输出改写后的正文（不要引号、不要代码块、不要解释）。"
+)
+#: 润色文本长度上限：防止模型把整段 JSON 倒进气泡。
+POLISH_MAX_CHARS = 1200
+#: 润色是可选体验项，超时比读表短：不能让用户为了「更好听」等太久。
+POLISH_TIMEOUT_SECONDS = 15.0
 LLM_TIMEOUT_SECONDS = 60.0
 #: condopt 支持的变量 kind（§9.4；非法值降级 + warning，不静默丢弃）。
 SUPPORTED_KINDS = ("continuous", "integer", "log", "categorical", "bool", "ordinal")
@@ -1551,7 +1561,7 @@ class Bridge:
         return {"ok": True, "message": message, **flat, "result": dict(flat)}
 
     # -- 模型读表（§9.4）----------------------------------------------------
-    def _llm_chat(self, api_key: str, request_body: dict) -> str:
+    def _llm_chat(self, api_key: str, request_body: dict, timeout: float = LLM_TIMEOUT_SECONDS) -> str:
         """OpenAI 兼容调用：``POST {baseURL}/chat/completions`` + ``Authorization: Bearer``。"""
         _check_api_key_for_header(api_key, self.llm_api_key_env)
         if self.llm_base_url_error:
@@ -1578,7 +1588,7 @@ class Bridge:
                 f"检查 {self.llm_api_key_env} 与 CONDOPT_IMPORT_LLM_BASE_URL 是否都是 ASCII/URL 安全字符",
             ) from exc
         try:
-            with urllib.request.urlopen(request, timeout=LLM_TIMEOUT_SECONDS) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 body = response.read().decode("utf-8", errors="replace")
         except (UnicodeEncodeError, http.client.InvalidURL, ValueError) as exc:
             _log(f"模型网关请求失败（配置类）：{type(exc).__name__}")
@@ -1737,19 +1747,70 @@ class Bridge:
         return self._kickoff_finish(self._kickoff_chat(payload))
 
     def _kickoff_finish(self, response: dict) -> dict:
-        """CONTRACT §10.4 的**模型通道开关位**。
+        """CONTRACT §10.4 / §11.3 的模型通道：**只**润色 ``reply.text``。
 
-        默认（未开 ``--import-llm``）绝不进入；即使开了，本版本也只把 ``reply`` 交给
-        :meth:`_kickoff_polish_reply`，而它现在**原样返回**——「宁可不变，也不许改
-        JSON 结构或路由结论」。将来接模型时只改这一个方法。
+        默认（未开 ``--import-llm``）绝不进入；开启后也只把 ``reply`` 交给
+        :meth:`_kickoff_polish_reply`，后者只可能改 ``text``——**任何失败都原样返回**，
+        所以「其余字段与不开时逐字节相同」是被构造保证的（不是靠调用方自觉）。
         """
         if self.import_llm:
-            response["reply"] = self._kickoff_polish_reply(dict(response["reply"]))
+            algorithms = [
+                str(card.get("key"))
+                for card in (response.get("options") or [])
+                if isinstance(card, Mapping) and card.get("key")
+            ]
+            reply = response.get("reply")
+            if isinstance(reply, Mapping):
+                response["reply"] = self._kickoff_polish_reply(reply, algorithms)
         return response
 
-    def _kickoff_polish_reply(self, reply: dict) -> dict:
-        """§10.4 占位：可选地用模型润色 ``reply.text``（尚未实现，当前为恒等函数）。"""
-        return reply
+    def kickoff_polish_request_body(self, draft: str, algorithms: list[str]) -> dict:
+        """§11.3：润色请求体——**只发必要内容**（本轮草稿 + 候选算法名）。
+
+        明确**不**发送 answers / problem / run 目录内容（用 ``_polish_body_fields`` 断言）。
+        """
+        payload: dict = {"draft": draft}
+        if algorithms:
+            payload["algorithms"] = list(algorithms)
+        return {
+            "model": self.llm_model,
+            "messages": [
+                {"role": "system", "content": POLISH_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            "temperature": 0,
+        }
+
+    def _kickoff_polish_reply(self, reply: Mapping, algorithms: list[str] | None = None) -> dict:
+        """§11.3 润色通道：成功只替换 ``text``；**任何失败/未配置都原样回落**。
+
+        绝不把异常抛给用户（非 JSON / 超时 / HTTP 500 / 配置错一律回落规则文案）。
+        """
+        original = dict(reply)
+        if not self.import_llm:
+            return original
+        draft = original.get("text")
+        if not isinstance(draft, str) or not draft.strip():
+            return original
+        api_key = os.environ.get(self.llm_api_key_env)
+        if not api_key:
+            _log("润色跳过：未配置密钥，回落规则文案")
+            return original
+        try:
+            body = self.kickoff_polish_request_body(draft, list(algorithms or []))
+            raw = self._llm_chat(api_key, body, timeout=POLISH_TIMEOUT_SECONDS)
+        except WorkbenchError as exc:
+            _log(f"润色失败（{exc.error}），回落规则文案")
+            return original
+        except Exception as exc:  # noqa: BLE001 - 润色绝不能把错误抛给用户
+            _log(f"润色失败（{type(exc).__name__}），回落规则文案")
+            return original
+        polished = raw.strip() if isinstance(raw, str) else ""
+        if not polished or len(polished) > POLISH_MAX_CHARS:
+            _log(f"润色结果不可用（{len(polished)} 字符），回落规则文案")
+            return original
+        original["text"] = polished
+        return original
 
     def _kickoff_chat(self, payload: Any) -> dict:
         """§10.2：五步收敛的对话状态机。**默认纯规则，不出网。**"""

@@ -12,10 +12,14 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -715,3 +719,271 @@ def test_every_algorithm_has_a_hand_written_card():
         assert name in condopt_registry.names(), f"ALGO_DISPLAY 有陈旧算法 {name!r}"
         assert entry["risk"] in ("low", "medium", "high")
         assert entry["title"] and entry["one_line"] and entry["tradeoff"]
+
+
+# --------------------------------------------------------------------------- #
+# 11. §11.3 `--import-llm` 润色通道（本机 stub 网关，不出网）
+# --------------------------------------------------------------------------- #
+
+TEST_KEY = "sk-POLISH-TEST-KEY-9f3c1d7a"
+POLISH_TEXT = "这条是模型改写后的助手文案。"
+
+
+class PolishGateway:
+    """本机假网关：可切换「正常 / 非 JSON / HTTP 500 / 超时」。
+
+    记录每次请求的原始 body 与 Authorization 头，供「发送体形状」与「密钥不外泄」断言。
+    """
+
+    def __init__(self, mode: str = "ok", reply: str = POLISH_TEXT, sleep: float = 0.0) -> None:
+        self.mode = mode
+        self.reply = reply
+        self.sleep = sleep
+        self.requests: list[dict] = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):  # noqa: D102 - 静音
+                return
+
+            def do_POST(self):  # noqa: N802 - stdlib 名字
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length).decode("utf-8", "replace")
+                outer.requests.append(
+                    {
+                        "path": self.path,
+                        "raw": raw,
+                        "authorization": self.headers.get("Authorization"),
+                        "content_type": self.headers.get("Content-Type"),
+                    }
+                )
+                if outer.sleep:
+                    time.sleep(outer.sleep)
+                if outer.mode == "http_500":
+                    payload = b'{"error":"upstream boom"}'
+                    self.send_response(500)
+                elif outer.mode == "non_json":
+                    payload = "这不是 JSON，只是一段纯文本。".encode("utf-8")
+                    self.send_response(200)
+                else:
+                    payload = json.dumps(
+                        {"choices": [{"message": {"content": outer.reply}}]}, ensure_ascii=False
+                    ).encode("utf-8")
+                    self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd.daemon_threads = True
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.httpd.server_address[1]}/v1"
+
+    def __enter__(self) -> "PolishGateway":
+        self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+
+
+@contextmanager
+def polish_server(runs_dir: Path, gateway: PolishGateway | None, *, enabled: bool, api_key_env: str = "TEST_KEY",
+                  monkeypatch=None):
+    """起一个真 HTTP 服务，Bridge 的润色开关/网关地址按需配置。"""
+    kwargs: dict = {"import_llm": enabled}
+    if gateway is not None:
+        kwargs["llm_base_url"] = gateway.base_url
+    kwargs["llm_api_key_env"] = api_key_env
+    bridge = bridge_module.Bridge(runs_dir, **kwargs)
+    httpd = server_module.create_server(bridge=bridge, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+def _rest_bytes(payload: dict) -> bytes:
+    """把 ``reply.text`` 抹掉后序列化：用来断言「其余字段逐字节相同」。"""
+    clone = json.loads(json.dumps(payload, ensure_ascii=False))
+    clone["reply"]["text"] = "<TEXT>"
+    return json.dumps(clone, ensure_ascii=False, sort_keys=True).encode("utf-8")
+
+
+def _flow_texts(base: str, flow=CHIP_FLOW):
+    """跑一遍五轮，返回每轮的 (payload, 原始响应文本)。"""
+    state = None
+    out = []
+    for _step, label in flow:
+        status, payload, text = call(base, "/api/kickoff/chat", {"messages": [{"role": "user", "content": label}], "state": state})
+        assert status == 200, text[:200]
+        state = payload["state"]
+        out.append((payload, text))
+    return out
+
+
+def test_polish_rewrites_only_reply_text(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", TEST_KEY)
+    off_runs, on_runs = tmp_path / "off", tmp_path / "on"
+    with PolishGateway() as gateway:
+        with polish_server(off_runs, None, enabled=False) as off_base:
+            off = _flow_texts(off_base)
+        with polish_server(on_runs, gateway, enabled=True) as on_base:
+            on = _flow_texts(on_base)
+    assert len(gateway.requests) == len(CHIP_FLOW), f"每轮应润色一次，实际 {len(gateway.requests)}"
+    for index, ((off_payload, _), (on_payload, _)) in enumerate(zip(off, on)):
+        assert _rest_bytes(off_payload) == _rest_bytes(on_payload), f"第 {index + 1} 轮除 reply.text 外的字段变了"
+        assert on_payload["reply"]["text"] == POLISH_TEXT, f"第 {index + 1} 轮没被润色"
+        assert off_payload["reply"]["text"] != POLISH_TEXT
+        # quick_replies 必须一模一样（润色不许碰）
+        assert on_payload["reply"]["quick_replies"] == off_payload["reply"]["quick_replies"]
+
+
+def test_polish_request_body_is_minimal(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", TEST_KEY)
+    sentinel = "SENTINEL-ANSWER-绝不会出现在外发体里-42"
+    with PolishGateway() as gateway:
+        with polish_server(tmp_path / "runs", gateway, enabled=True) as base:
+            state = {
+                "step": "objective",
+                "answers": {"objective": {"name": sentinel, "direction": "max"}, "budget": 160,
+                            "variables": [{"name": sentinel, "kind": "continuous", "low": 1, "high": 2}]},
+            }
+            call(base, "/api/kickoff/chat", {"messages": [{"role": "user", "content": "x"}], "state": state})
+    assert len(gateway.requests) == 1
+    request = gateway.requests[0]
+    assert request["path"].endswith("/chat/completions"), request["path"]
+    body = json.loads(request["raw"])
+    assert set(body) == {"model", "messages", "temperature"}, f"发送体多了字段: {sorted(body)}"
+    assert body["model"] == bridge_module.DEFAULT_LLM_MODEL
+    assert len(body["messages"]) == 2
+    assert body["messages"][0] == {"role": "system", "content": bridge_module.POLISH_SYSTEM_PROMPT}
+    payload = json.loads(body["messages"][1]["content"])
+    assert set(payload) == {"draft"}, f"只该发草稿（本步无候选算法），实际 {sorted(payload)}"
+    assert isinstance(payload["draft"], str) and payload["draft"]
+    # answers 里的哨兵值一个字都不许出去
+    assert sentinel not in request["raw"], "answers 内容被发出去了"
+    for forbidden in ("answers", "variables", "budget", "objective", "problem"):
+        assert forbidden not in request["raw"], f"发送体里出现了 {forbidden}"
+
+
+def test_polish_sends_candidate_algorithms_on_options_round(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", TEST_KEY)
+    with PolishGateway() as gateway:
+        with polish_server(tmp_path / "runs", gateway, enabled=True) as base:
+            state = None
+            for _step, label in CHIP_FLOW:
+                payload = chat(base, state, label)
+                state = payload["state"]
+    last_body = json.loads(gateway.requests[-1]["raw"])
+    user_payload = json.loads(last_body["messages"][1]["content"])
+    options_keys = [card["key"] for card in payload["options"]]
+    assert user_payload.get("algorithms") == options_keys, "候选算法名必须随草稿一起发（且只有这些）"
+
+
+@pytest.mark.parametrize(
+    "mode,sleep",
+    [("non_json", 0.0), ("http_500", 0.0), ("timeout", 3.0)],
+)
+def test_polish_falls_back_byte_identical_on_failure(tmp_path: Path, monkeypatch, mode, sleep):
+    """非 JSON / HTTP 500 / 超时 → 回落，且整个响应与不开润色时**逐字节相同**。"""
+    monkeypatch.setenv("TEST_KEY", TEST_KEY)
+    if mode == "timeout":
+        monkeypatch.setattr(bridge_module, "POLISH_TIMEOUT_SECONDS", 0.5)
+    with PolishGateway(mode=mode, sleep=sleep) as gateway:
+        with polish_server(tmp_path / "off", None, enabled=False) as off_base:
+            off = _flow_texts(off_base)
+        with polish_server(tmp_path / "on", gateway, enabled=True) as on_base:
+            on = _flow_texts(on_base)
+    assert gateway.requests, "stub 应该被调用过（否则测的不是失败回落）"
+    for index, ((off_payload, off_text), (on_payload, on_text)) in enumerate(zip(off, on)):
+        assert on_payload == off_payload, f"{mode}: 第 {index + 1} 轮响应与不开时不同"
+        assert on_text == off_text, f"{mode}: 第 {index + 1} 轮原始响应不是逐字节相同"
+    # 异常类名/回溯不许漏给用户
+    assert "Traceback" not in on_text and "Error" not in on_text
+
+
+def test_polish_without_key_makes_no_call(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TEST_KEY", raising=False)
+    with PolishGateway() as gateway:
+        with polish_server(tmp_path / "runs", gateway, enabled=True) as base:
+            on = _flow_texts(base)
+    assert gateway.requests == [], "没有密钥时一次都不该发"
+    with polish_server(tmp_path / "off", None, enabled=False) as off_base:
+        off = _flow_texts(off_base)
+    assert [p for p, _ in on] == [p for p, _ in off]
+
+
+def test_polish_never_leaks_key_or_upstream_error(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("TEST_KEY", TEST_KEY)
+    with PolishGateway(mode="http_500") as gateway:
+        with polish_server(tmp_path / "runs", gateway, enabled=True) as base:
+            payload = chat(base, None, "收率越大越好")
+    text = json.dumps(payload, ensure_ascii=False)
+    assert TEST_KEY not in text, "密钥出现在响应里"
+    assert "upstream boom" not in text, "上游错误原文出现在响应里"
+    captured = capsys.readouterr()
+    assert TEST_KEY not in captured.out and TEST_KEY not in captured.err
+    assert TEST_KEY not in gateway.requests[0]["raw"], "密钥不该出现在请求体（只在 Authorization 头）"
+    assert gateway.requests[0]["authorization"] == f"Bearer {TEST_KEY}"
+
+
+def test_polish_falls_back_when_reply_too_long(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("TEST_KEY", TEST_KEY)
+    with PolishGateway(reply="很长" * 900) as gateway:
+        with polish_server(tmp_path / "runs", gateway, enabled=True) as base:
+            payload = chat(base, None, "收率越大越好")
+    assert gateway.requests, "stub 应被调用"
+    assert payload["reply"]["text"] != "很长" * 900
+    assert len(payload["reply"]["text"]) <= bridge_module.POLISH_MAX_CHARS
+
+
+def test_no_polish_when_flag_off_is_truly_offline(tmp_path: Path, monkeypatch):
+    """不开 --import-llm：**非回环** socket 一调即抛，整条 chat→plan→init 仍跑通。
+
+    回环要放行（测试客户端与本地服务本身走 127.0.0.1）——判据是「不出网」，
+    不是「不建连接」；stub 网关收到 0 次是第二重证据。
+    """
+    def deny(*args, **kwargs):
+        # 两种调用形态都要认：``socket.connect(address)`` 与 ``create_connection(address, …)``。
+        address = args[0] if args and isinstance(args[0], tuple) else (args[1] if len(args) > 1 else kwargs.get("address"))
+        host = address[0] if isinstance(address, tuple) and address else None
+        if host in ("127.0.0.1", "localhost", "::1"):
+            return real_connect(*args, **kwargs)
+        raise AssertionError(f"未开润色开关时不允许出网，却尝试连接 {address!r}")
+
+    real_connect = socket.socket.connect
+    monkeypatch.setattr(socket.socket, "connect", deny)
+    monkeypatch.delenv("TEST_KEY", raising=False)
+    try:
+        with PolishGateway() as gateway:
+            with polish_server(tmp_path / "runs", gateway, enabled=False) as base:
+                last = None
+                state = None
+                for _step, label in CHIP_FLOW:
+                    payload = chat(base, state, label)
+                    state = payload["state"]
+                    last = payload
+                plan_payload = plan(base, state)
+                status, _body, text = call(
+                    base, "/api/action",
+                    {"action": "init", "payload": {"id": "offline-run", "answers": plan_payload["answers"],
+                                                   "algorithm": plan_payload["algorithm"]}},
+                )
+                assert status == 200, text[:200]
+        assert gateway.requests == []
+    finally:
+        pass  # monkeypatch 会在测试结束时自动还原
+    assert last is not None and last["state"]["step"] == "options"
