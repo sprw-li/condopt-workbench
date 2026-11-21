@@ -62,6 +62,7 @@ PROBE = r"""
 
 def main() -> int:
     report = Report("高级参数 details 打开前后的重叠对照")
+    SHOTS.mkdir(parents=True, exist_ok=True)   # 克隆里可能不存在（健壮性：缺目录不该算产品失败）
     runs = fresh("advparams")
     port = bp.free_port()          # §11.5：动态端口，避免固定端口竞态
     proc = G.start_edge(port, bp.make_profile("advparams"))

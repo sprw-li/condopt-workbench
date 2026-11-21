@@ -68,6 +68,7 @@ PROBE = r"""
 
 def main() -> int:
     report = Report("确认与定级：参数页底部遮挡")
+    SHOTS.mkdir(parents=True, exist_ok=True)   # 克隆里可能不存在（健壮性：缺目录不该算产品失败）
     runs = fresh("paramoverlap2")
     port = bp.free_port()          # §11.5：动态端口，避免固定端口竞态
     proc = G.start_edge(port, bp.make_profile("paramoverlap2"))

@@ -103,6 +103,7 @@ def start_edge(port: int, profile: Path, width: int, height: int):
 
 def main() -> int:
     report = Report("几何矩阵：主题 × 视口 × 状态（独立复核 web-shell 的补测）")
+    SHOTS.mkdir(parents=True, exist_ok=True)   # 克隆里可能不存在（健壮性：缺目录不该算产品失败）
     runs = fresh("matrix")
     with Server(runs) as server:
         for theme, viewport, width, height in CONFIGS:

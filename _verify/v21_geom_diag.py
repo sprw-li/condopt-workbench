@@ -89,6 +89,7 @@ PAIRS = [
 
 def main() -> int:
     report = Report("几何重叠真伪诊断（裁切感知 + 命中测试）")
+    SHOTS.mkdir(parents=True, exist_ok=True)   # 克隆里可能不存在（健壮性：缺目录不该算产品失败）
     runs = fresh("geomdiag")
     profile = bp.make_profile("geomdiag")
     port = bp.free_port()
