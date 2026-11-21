@@ -1071,7 +1071,13 @@
         const current = local.find((scenario) => scenario.key === state.scenarioKey);
         if (current) {
           const button = list.querySelector('[data-key="' + current.key + '"]');
-          if (button) button.click();  // 触发 app.js 的 selectScenario → renderStages()
+          // [app.js hook #11 配套] 「重选当前场景」现在是 no-op（契约 §11.2），
+          // 所以 stages 漂移修复不能再靠 button.click()，必须走显式 force。
+          if (window.EduKit && typeof EduKit.selectScenario === "function") {
+            EduKit.selectScenario(current.key, { force: true, quiet: true });
+          } else if (button) {
+            button.click();  // 老 app.js（没有该导出）时的兜底
+          }
         }
       }
     }

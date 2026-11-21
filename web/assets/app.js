@@ -116,6 +116,10 @@
     // 不新增任何渲染逻辑，也没有 CONDOPT 时用不到它。
     renderMode,
     get state() { return state; },
+    // [condopt hook #11] 导出 selectScenario 本身：因为「重选当前场景」已改成 no-op，
+    // condopt.js 的 stages 漂移修复（原本靠 button.click() 触发重画）必须显式传 {force:true}。
+    // 不新增渲染逻辑；没有 CONDOPT 时没人会调它。
+    selectScenario,
   };
 
   async function mockRun(payload, emit) {
@@ -259,7 +263,16 @@
     return String(text || "").split("→")[0].trim();
   }
 
+  // [condopt hook #11] 「再次选中当前已选中的同一场景」必须是 no-op。
+  // 起因（契约 §11.2 裁定，2026-11-21）：同一张卡再点一次会把用户在场景里做的编辑冲掉——
+  // 实测 `selectScenario` 里的 `el.input.value = scenario.example || ""` 会把 answers JSON
+  // 覆盖回模板示例；重画 outputTags / resetOutput 也会清掉本次产出。用户点的是**已经选中**的场景，
+  // 没有任何「重来」意图，不该丢状态。
+  // `{force:true}` 留给程序化重绘（condopt.js 的 stages 漂移修复），首屏 boot 首次调用不受影响。
+  let scenarioApplied = false;
+
   function selectScenario(key, options = {}) {
+    if (!options.force && scenarioApplied && state.scenarioKey === key) return;
     if (state.running) {
       toast("先等这次处理结束，再切换场景");
       return;
@@ -291,6 +304,7 @@
     resetOutput();
     if (!options.quiet) el.input.focus({ preventScroll: true });
     el.stream.scrollTop = 0;
+    scenarioApplied = true;   // [condopt hook #11] 首次应用完成，之后同 key 再进就是 no-op
   }
 
   function resetOutput() {

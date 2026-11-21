@@ -44,7 +44,7 @@ py -3 server.py --runs-dir runs        # 直接操作仓库现有 study
 `assets/_upstream_app.css` 是工作区里既有的上游 `app.css` 原件副本（23,426 字节，与本文件
 改动前的 `app.css` 逐字节相同），**原样保留**，用于随时 diff 出「上游布局 + condopt 覆盖段」。
 
-## 2. `assets/app.js` 的每一处改动（9 个钩子）
+## 2. `assets/app.js` 的每一处改动（11 个钩子）
 
 原则：只在调用点插入一个**受 `window.CONDOPT` 保护**的分支；`CONDOPT` 不存在时
 逐行回落上游行为。每一处都在源码里带 `// [condopt hook #N]` 注释，可 grep 定位。
@@ -61,6 +61,7 @@ py -3 server.py --runs-dir runs        # 直接操作仓库现有 study
 | 8 | `app.js:340` `renderMode()` | 未 live 时允许 `CONDOPT.modeBadge()` 提供文案（`text`/`pill`/`note`/`connected`） | **P1**：上游只在收到 SSE `meta` 帧后才切 live，起后端后首屏仍写「离线演示」。现在 bootstrap/runs 一通就显示「后端已连接 · 待运行」，只有真正回退 `mockRun` 才写离线。钩子缺席时逐字沿用上游文案 |
 | 9 | `app.js:112` `window.EduKit` | 导出上游已有的 `renderMode` | 让 condopt.js 在 `/api/bootstrap` 成功后**立刻重画徽章**（否则要等用户跑一次场景）。只导出入口，不新增渲染逻辑，避免在 condopt.js 里复制一份 DOM 写入 |
 | 10 | `app.js:419` `run()` 开头 | `CONDOPT.handlesRun(key)` 为真时，把「开始处理」交给 `CONDOPT.runScenario(key)` 并 return | **06 导入数据没有 SSE 场景**（契约 §9 只有 scan/map/apply 三个 JSON 端点），上游的「必须有文本/附件 → 走 SSE」流程不适用。钩子缺席时行为与上游一致 |
+| 11 | `app.js:262` `selectScenario()` 开头 + `app.js:112` 导出 | 新增模块级 `scenarioApplied`：`{force:true}` 之外，`scenarioApplied && state.scenarioKey === key` 时**直接 return**；末尾置 `scenarioApplied = true`；并把 `selectScenario` 挂到 `window.EduKit` 供程序化重绘用 | **契约 §11.2 裁定：再次选中「当前已选中」的同一场景必须 no-op。** 实测同一张卡再点一次会把 `#input` 覆盖成 `el.input.value = scenario.example`，冲掉用户在抽屉里的 answers/旧表单编辑。首屏 boot 的首次调用不受影响（`scenarioApplied` 初值 false）；`?demo=` 的 `run()` 是独立一步，仍照跑 |
 
 追加说明（非 app.js 文件内容改动，但属于集成方式）：
 
@@ -641,26 +642,51 @@ py -3 _verify\geom_probe.py
 > 组合态用 CDP `Input.imeSetComposition` 造；**提交**用真实 `compositionend` 事件 + 最终文本，
 > 因为 CDP 没有「确认候选」的原语 —— 这一步是模拟，如实说明。
 
-### 10.2 `?demo=<key>` 与聊天首屏共存（**未改产品代码**）
+### 10.2 `?demo=<key>` 与聊天首屏共存（修了同 key 重选的缺陷）
 
-lead 说过：若判断「两者本就不该同时跑」要先报他，不许自行改语义。我先只做验证，结果是
-**共存本来就不互破**，所以我没有动任何语义（`app.js` 的 `run()` / `?demo=` 定时器一字未改）。
+**第一次自查是 PASS，但判据不全**：我只测了「开始处理」按钮那条 `run()` 路径，而 `?demo=` 的实现是
+**两步** —— `selectScenario(key, {quiet:true})` **+** `setTimeout(run, 520)`。重选场景那一步没覆盖到。
+验收者在冻结提交上补测「点侧栏当前已选中的同一张卡」，才暴露出真缺陷。
 
-**原文结果**（`demo 9/9`）：
+**缺陷与根因**：`selectScenario()` 无条件执行 `el.input.value = scenario.example || ""` 并 `resetOutput()`，
+于是用户聊了两轮后点**已经选中的**那张卡，`answers` JSON 被覆盖回模板示例、本次产出被清空
+（聊天气泡/`step` 在本次实现里没丢，但用户编辑确实丢了）。用户没有任何「重来」意图，属于产品缺陷。
+
+**修法（[condopt hook #11]）**：`selectScenario` 在「同一个 key 且已经应用过」时**直接 return**；
+`{force:true}` 保留给程序化重绘。配套：`condopt.js` 的 stages 漂移修复原本靠 `button.click()` 触发重画，
+现已改为显式 `EduKit.selectScenario(key, {force:true, quiet:true})`（老 app.js 无该导出时仍回落 `button.click()`）。
+
+**修好前后对照（临时驱动同一条脚本、同一台 server）**：
 ```
-加载 ?demo=kickoff 后 #condoptKickoff 仍存在且可见   {mount:true, mountVisible:true, bubbles:1}
-★ 聊天气泡数不为 0（演示流没清空聊天）              bubbles=1
-两条芯片后 step 已前进                           step=variables
-★ 已答轮次不丢：气泡数不减少                      5 → 5
-★ state.step 不回退                          variables → variables
-演示流没盖住左栏聊天（聊天仍可见）                     ✓
-演示输出落在右栏                              outInRight=true
-左栏聊天 × 右栏输出 几何重叠 = 0                    overlap=0
-全程零未捕获异常                              ✓
+修复前  触发前 {bubbles:5, step:'variables', answersJson:'{"_user_edit":true}'}
+        触发后 {bubbles:5, step:'variables', answersJson:'{ "objective":… 'budget':24 …'} }   ← answers 被覆盖回模板
+        探针日志 [{render, messages:5…}, {mutate}]                                            ← 真的走了一遍重绘
+修复后  触发前 {bubbles:5, step:'variables', answersJson:'{"_user_edit":true}'}
+        触发后 {bubbles:5, step:'variables', answersJson:'{"_user_edit":true}'}                ← 原样保留
+        探针日志 []                                                                          ← 真 no-op（连 render 都没调）
 ```
-（触发「再跑一遍演示路径」用的是「开始处理」按钮 —— `?demo=` 的 520ms 定时器调的就是同一个 `run()`。）
-
-截图：`_shots/demo_1_before_demo.png`、`_shots/demo_2_coexist.png`。
+**判据（`before` 6/7 → `after` 7/7）**：
+```
+before : FAIL 触发 A：旧表单/answers JSON 文本保留   （其余 6 项 PASS：气泡不减、step 不回退、触发 B、跨场景切换、无异常）
+after  : RESULT 7/7
+         触发 A：气泡数不减少 5→5 ｜ step 不回退 variables→variables ｜ answers JSON 文本保留 ✓
+         触发 B（演示 run）：气泡数不减少 5→5 ｜ step 不回退 ✓
+         跨场景切换（02→01）仍允许重置 ✓（契约明确允许，不算缺陷）
+         无未捕获异常 ✓
+```
+**回归（确认没把「首屏演示」和「boot 应用场景」弄坏，7/7）**：
+```
+boot 仍应用场景：#scenarioMeta = 01 / 开工建议     ✓
+boot 仍写入示例：answers JSON len=656            ✓
+boot 仍渲染「本次产出」标签：tags=3                ✓
+当前场景卡仍高亮 kickoff：["kickoff"]             ✓
+?demo= 自动演示仍跑：mdHidden=false streamLen=1234 ✓
+聊天首屏未被演示流清空：bubbles=1                  ✓
+无未捕获异常                                    ✓
+```
+截图：`_shots/samekey_before_1_before.png` / `samekey_before_2_after.png`（修复前：answers 被换回模板）、
+`samekey_after_1_before.png` / `samekey_after_2_after.png`（修复后：文本保留）、
+`samekey_after_3_demo_regress.png`（首屏演示仍正常）。
 
 ### 10.3 旧表单逐字段（改了 `assets/condopt.js`，**修掉一个真缺陷**）
 
