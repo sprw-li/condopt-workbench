@@ -340,4 +340,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(browser_profile.guard_residue(main))
+    # §11.5-6：串行锁（同一台机器上浏览器驱动必须串行跑）。
+    # 用 ``run_guarded`` 而不是 ``guard_residue`` —— 只有前者会取锁；
+    # 拿不到锁 → exit 4（环境/并发类），不记成产品缺陷、不静默重试。
+    raise SystemExit(browser_profile.run_guarded(main, "ime"))

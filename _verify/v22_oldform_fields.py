@@ -405,6 +405,71 @@ def main() -> int:
             report.check("类型保持（checkbox→bool、number→数值、list→list、text→str）", type_ok,
                          "; ".join(type_detail[:5]) if type_detail else "全部保持")
 
+            # ---- 加强 ①：每个控件「改两次取第二个值」（防缓存 / 防「只读一次就通过」）
+            #      ②：SELECT 遍历**所有** option（不是只切下一个）
+            second_ok = True
+            second_detail: list[str] = []
+            for index, info in enumerate(results):
+                path = info["path"]
+                tag = info["tag"]
+                ctype = info["type"]
+                kind = info["kind"]
+                if ctype == "checkbox":
+                    set_control(cdp, index, "c.checked = !c.checked;")
+                    cdp.pump(0.1)
+                    set_control(cdp, index, "c.checked = !c.checked;")
+                    expected_dom = cdp.evaluate(
+                        "document.querySelectorAll('" + FIELDS_BOX + " [data-path]')[" + str(index) + "].checked"
+                    )
+                    model = read_answers(cdp)
+                    got = get_path(model, path) if isinstance(model, dict) else None
+                    expected = bool(expected_dom)
+                    if got != expected:
+                        second_ok = False
+                        second_detail.append(f"{path}: 第二次 期望 {expected!r} 实得 {got!r}")
+                    continue
+                if tag == "SELECT":
+                    count = int(info.get("options") or 0)
+                    for option_index in range(count):
+                        set_control(cdp, index, f"c.selectedIndex={option_index};")
+                        cdp.pump(0.1)
+                        expected = cdp.evaluate(
+                            "document.querySelectorAll('" + FIELDS_BOX + " [data-path]')[" + str(index) + "].value"
+                        )
+                        model = read_answers(cdp)
+                        got = get_path(model, path) if isinstance(model, dict) else None
+                        if got != expected:
+                            second_ok = False
+                            second_detail.append(
+                                f"{path}: 第 {option_index} 个 option 期望 {expected!r} 实得 {got!r}"
+                            )
+                    continue
+                if ctype == "number":
+                    set_control(cdp, index, "c.value = '7.25';")
+                    set_control(cdp, index, "c.value = '13.5';")
+                    expected = 13.5
+                elif kind == "list":
+                    set_control(cdp, index, "c.value = 'a, b';")
+                    set_control(cdp, index, "c.value = 'c';")
+                    expected = ["c"]
+                else:
+                    set_control(cdp, index, f"c.value = 'again-{index}';")
+                    set_control(cdp, index, f"c.value = 'second-{index}';")
+                    expected = f"second-{index}"
+                cdp.pump(0.1)
+                model = read_answers(cdp)
+                got = get_path(model, path) if isinstance(model, dict) else None
+                if got != expected:
+                    second_ok = False
+                    second_detail.append(f"{path}: 期望第二次的值 {expected!r} 实得 {got!r}")
+
+            report.check("加强①：每个控件连改两次 → 读回的是**第二次**的值（不是缓存/只读一次）",
+                         second_ok, "; ".join(second_detail[:5]) if second_detail else
+                         f"{len(results)} 个控件第二次改值全部对上")
+            select_infos = [item for item in results if item["tag"] == "SELECT"]
+            report.check("加强②：SELECT 遍历**所有** option，逐个读回一致",
+                         bool(select_infos), f"SELECT 控件 {len(select_infos)} 个，已逐个 option 比对")
+
             after_all = read_answers(cdp)
             report.check("未触碰的字段不影响：键集与基线一致（只改了值，没增删键）",
                          isinstance(after_all, dict) and set(after_all) == baseline_keys,
@@ -473,4 +538,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(browser_profile.guard_residue(main))
+    # §11.5-6：串行锁（同一台机器上浏览器驱动必须串行跑）。
+    # 用 ``run_guarded`` 而不是 ``guard_residue`` —— 只有前者会取锁；
+    # 拿不到锁 → exit 4（环境/并发类），不记成产品缺陷、不静默重试。
+    raise SystemExit(browser_profile.run_guarded(main, "oldform"))
