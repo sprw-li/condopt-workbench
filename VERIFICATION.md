@@ -2145,3 +2145,51 @@ web-shell 用 `#scenarioList [data-key="kickoff"]` 复现不出，怀疑我实�
 **契约点名的驱动文件根本不存在**（我已按 lead 裁定用 `v22_verify_demo.py` 补上）——
 「判据存在性」可以机器检查，建议补一条：**契约里点名的 `_verify/*.py` 必须真实存在**，
 否则「已验证」这句话没有落点。这与 §11.5-8 那类检查同族，且更容易做。
+
+
+### 22.C 按最终冻结点 `f65b3fb` 的复跑（2026-11-21 12:52）
+
+**结论：PASS — `f65b3fb2e2f166a1ff625062c722f27a1570faf9`（短哈希 `f65b3fb`）。**
+全新克隆（`git clone` → 只含已提交内容）、`git status --porcelain` **空**、159 个文件。
+**并发状态：安静机器**（无其他驱动进程、无串行锁、起始 `%TEMP%` 残留 0）→ **不涉及并发归因**。
+**清扫状态：本次复跑发生在一次全量清扫之后**（我删除了自己两个陈旧克隆 `_b_freeze`(c0087b2) / `_b_freeze2`(05d1fb6)；
+lead 已删除其一次性克隆与两个 `condopt-router` 克隆；`%TEMP%` 起始残留 0）。
+
+**先核对「冻结树里确实是我验过的那份」**（避免验的是工作树）：
+```
+v21_geom_diag.py 含 SHOTS.mkdir   = True      ← 我在 B 段给 4 个驱动加的健壮性修复已入库
+v22_verify_demo.py 含 触发A/触发B  = True      ← 按新契约收紧后的判据
+v22_verify_demo.py 残留弱断言      = False     ← 「气泡 != 0」那条已删
+9 个工具文件（4 份 v22_verify_* + trigger_probe + 2 个 check_* + browser_profile + run_browser_suite）全部存在
+_verify/_migrate_*.py = 0 个（已按建议删除）
+```
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 全量回归 | `py -3 -m pytest -q` | **114 passed in 30.73s** |
+| 起服务自检 | `py -3 server.py --port 0 --selftest` | **9/9** |
+| 文档路径机器检查（lead 新增，源自我的建议） | `py -3 _verify/check_contract_paths.py` | **通过**（点名 21 处全部存在） |
+| 其负对照 | `--self-test` | **全部通过** |
+| 驱动入口取锁检查（§11.5-8） | `py -3 _verify/check_driver_entrypoints.py` | **通过**（所有浏览器驱动入口都取锁） |
+| 卫生模块自检 | `py -3 _verify/browser_profile.py --self-test` | **11/11** |
+| §11.1 IME | `py -3 _verify/v22_verify_ime.py` | **5/5 PASS** |
+| §11.2 `?demo=` 共存 | `py -3 _verify/v22_verify_demo.py` | **7/7 PASS** |
+| §11.3 润色 | `py -3 _verify/v22_verify_polish.py` | **11/11 PASS** |
+| §11.4 旧表单 | `py -3 _verify/v22_verify_oldform.py` | **5/5 PASS** |
+| lead 的矩阵 | `py -3 _verify/viewport_matrix.py` | **10/10**（`light 680,800 → mq680=True`、横向溢出 0） |
+
+**残留判据（跨 settle 多次计数）**：
+```
+跑前 condopt-* = 0
+（4 个浏览器驱动串行跑完，各自 [卫生] 本进程 before=0 after=0；同前缀全局=0）
+跑后 #1 (+3s) = 0    跑后 #2 (+8s) = 0    跑后 #3 (+14s) = 0
+msedge(condopt) = 0   锁文件 = 不存在
+```
+
+**§11.2 复验（本次为最终确认）**：触发 A（重选当前场景）与触发 B（演示 `run()`）都保持
+`气泡=5 / step='③ 可调条件'` 不变，`Runtime.exceptionThrown=0`，几何 0/0 —— 与 §22.B.2 一致。
+
+**未测项**：同 §22.B.5（真实第三方 IME、跨场景切换的反向情形、旧表单加减行、润色对非 chat 响应、大预算端到端时长）。
+**最担心的风险**：同 §22.B.6 —— 「共存/不破坏」类判据极易写成弱断言（我在本轮犯过两次），
+目前**没有机器检查能发现「判据写太弱」**；`check_contract_paths.py` 已挡住「点名的判据文件不存在」这一类，
+但「判据存在 ≠ 判据够强」仍需人工纪律。
