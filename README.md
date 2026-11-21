@@ -1,5 +1,8 @@
 # condopt 工作台
 
+> **本仓是 condopt 的交互面（保留面，2026-11-22 起）。** 优化库本体与 skill 真源在
+> <https://github.com/sprw-li/condopt-router>；DSH 面板那条路径已冻结（`dsh-condopt`）。
+
 > 把 [condopt](https://github.com/sprw-li/condopt-router) 包成一个**浏览器里的实验工作台**：
 > 开工建议 → 下一批取样 → 结果回填 → 交付自查 → 看板 → 导入已有数据。
 > 界面复用本机已有的一个前端复用包（EduKit，无构建、无 npm、断网可跑）；来源见 [`web/ADAPTATION.md`](web/ADAPTATION.md)。
