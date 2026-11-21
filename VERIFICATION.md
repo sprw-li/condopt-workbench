@@ -1779,7 +1779,7 @@ ok = (zero == 0 and real == 0 and code == 0) # ← -1 == 0 为 False → 判非�
 「新克隆能不能直接跑」这个发布口径。
 
 ```
-git clone D:\Dev\condopt-workbench D:\Dev\_freeze_check_verifier
+git clone <repo> <临时克隆>
 git rev-parse HEAD   → 319e8fc559acaf3830cdd734a78000a74161b06e      ✅ 与 lead 指定的冻结提交一致
 git status --porcelain → 空（clean）                                  ✅
 克隆内 runs/ 、state/ → 均不存在（符合预期；脚本各自用 common.fresh() 建自己的临时 run 根）
@@ -1850,9 +1850,9 @@ light  680,800   抽屉全开  0 0 0 exit=0  mq1024=True  mq680=True  溢出 0
 
 **发布口径（顺带验到）**：克隆内既无 `runs/` 也无 `state/`，`v21_kickoff.py` / `v21_frontend_kickoff.py`
 仍能在克隆里从零建 run 并跑完（各自用 `common.fresh()` 建临时 run 根），说明**新克隆开箱可跑**。
-唯一外部依赖是 condopt 算法库（从同级检出解析，克隆路径仍在 `D:\Dev\` 下，解析正常）。
+唯一外部依赖是 condopt 算法库（从同级检出解析，克隆路径仍在 `<工作区父目录>\` 下，解析正常）。
 
-**证据**：`D:\Dev\_freeze_check_verifier\_verify\logs\{freeze_vm.txt, freeze_vm_selftest.txt,
+**证据**：`<临时克隆>\_verify\logs\{freeze_vm.txt, freeze_vm_selftest.txt,
 freeze_matrix_bycommit.txt, freeze_v21_kickoff.txt, freeze_v21_frontend_kickoff.txt,
 freeze_v21_f11_guard.txt, freeze_v21_narrow_layout.txt}`。
 
@@ -1870,7 +1870,7 @@ lead 在 `319e8fc` 之后又提交了一个 `ec73626`（改 `_verify/geom_probe.
 产品代码零改动）。按本轮一直执行的口径「**已验收的提交 ≠ 声明冻结的提交**」，我按新冻结点重跑。
 为避免「同一个克隆里换 commit」造成残留干扰，我做的是**全新克隆**（比 `checkout` 更强：连工作树都不可能是旧的）：
 ```
-git clone D:\Dev\condopt-workbench D:\Dev\_freeze_check_verifier
+git clone <repo> <临时克隆>
 git rev-parse HEAD     → ec73626507d2c0599d5f27a8eb162c00fa7d51d7   ✅ 与声明的冻结点一致
 git status --porcelain → 空（clean）                                 ✅     文件总数 148
 克隆内 runs/ 、state/   → 均不存在（脚本各自 common.fresh() 建临时 run 根）✅
@@ -1928,7 +1928,7 @@ lead 的修复成本身要求「跑完新增残留数 == 0」而不是「没报�
 我**没有**在本轮改动这些已提交脚本（否则「按提交版本」的证据会被我自己的改动污染）——
 若要收口，这应当是下一轮独立提交，并需重新验证。**如实留痕，不静默带过。**
 
-**证据**（一次性克隆 `D:\Dev\_freeze_check_verifier`，按要求保留）：
+**证据**（一次性克隆 `<临时克隆>`，按要求保留）：
 `_verify\logs\{freeze2_vm.txt, freeze2_myrunner.txt, freeze2_v21_kickoff.txt,
 freeze2_v21_frontend_kickoff.txt, freeze2_v21_f11_guard.txt, freeze2_v21_narrow_layout.txt}`。
 其 8788 服务已停止；**8770 上 lead 的服务未受影响（仍 HTTP 200）**。
